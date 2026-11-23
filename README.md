@@ -4,6 +4,11 @@
 
 本机运行，数据全部存在本地 `data/` 目录，不上传任何服务器。
 
+## 下载
+
+Windows x64 安装包：[releases/CartoonNotebook_0.1.0_x64-setup.exe](releases/CartoonNotebook_0.1.0_x64-setup.exe)
+（约 6.4 MB，双击安装，不依赖任何运行库；数据同样存在本机）
+
 ## 功能
 
 **收藏管理**
