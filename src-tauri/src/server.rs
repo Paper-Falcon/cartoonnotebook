@@ -1,0 +1,1806 @@
+use crate::{anilist, db};
+use axum::{
+    body::Body,
+    extract::{ConnectInfo, Multipart, Path, Query, State},
+    http::{header, HeaderMap, Request, StatusCode, Uri},
+    middleware::{self, Next},
+    response::{IntoResponse, Redirect, Response},
+    routing::{delete, get, patch, post},
+    Json, Router,
+};
+use rand::Rng;
+use rust_embed::RustEmbed;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::io::AsyncWriteExt;
+use tower::ServiceExt;
+use tower_http::{cors::CorsLayer, services::ServeFile};
+
+pub const INDEX_JSON: &[u8] = include_bytes!("../assets/index.min.json");
+pub const DEFAULT_PORT: u16 = 8787;
+
+/// 前端构建产物直接嵌进二进制：打包版和手机访问都用这一份
+#[derive(RustEmbed)]
+#[folder = "../dist"]
+struct Assets;
+
+/// 全局状态：一个 SQLite 连接 + 数据目录 + 复用的 HTTP 客户端
+pub struct AppState {
+    pub db: Mutex<rusqlite::Connection>,
+    pub data_dir: PathBuf,
+    pub http: reqwest::Client,
+    /// 手机端登录用的长期口令（存数据库，重启不变）
+    pub phone_token: String,
+    /// 一次性配对码 + 生成时间
+    pub pair: Mutex<Option<(String, Instant)>>,
+    /// 扫到的 Wallpaper Engine 壁纸（首次访问时扫描，可手动刷新）
+    pub wallpapers: Mutex<Vec<Wallpaper>>,
+    pub port: u16,
+}
+
+impl AppState {
+    pub fn new(data_dir: PathBuf, port: u16) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(data_dir.join("covers"))?;
+        std::fs::create_dir_all(data_dir.join("media"))?;
+        let conn = db::open(&data_dir)?;
+
+        let phone_token = match db::get_setting(&conn, "phone_token")? {
+            Some(t) if !t.is_empty() => t,
+            _ => {
+                let t: String = rand::thread_rng()
+                    .sample_iter(&rand::distributions::Alphanumeric)
+                    .take(40)
+                    .map(char::from)
+                    .collect();
+                db::set_setting(&conn, "phone_token", &t)?;
+                t
+            }
+        };
+
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()?;
+        Ok(Self {
+            db: Mutex::new(conn),
+            data_dir,
+            http,
+            phone_token,
+            pair: Mutex::new(None),
+            wallpapers: Mutex::new(Vec::new()),
+            port,
+        })
+    }
+
+    /// 生成（或复用 5 分钟内的）配对码
+    pub fn fresh_pair_code(&self) -> String {
+        let mut slot = self.pair.lock().expect("pair mutex poisoned");
+        if let Some((code, at)) = slot.as_ref() {
+            if at.elapsed() < Duration::from_secs(300) {
+                return code.clone();
+            }
+        }
+        let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000));
+        *slot = Some((code.clone(), Instant::now()));
+        code
+    }
+
+    /// 校验配对码；成功即作废（一次性）
+    pub fn consume_pair_code(&self, code: &str) -> bool {
+        let mut slot = self.pair.lock().expect("pair mutex poisoned");
+        let ok = matches!(
+            slot.as_ref(),
+            Some((c, at)) if at.elapsed() < Duration::from_secs(300) && c == code
+        );
+        if ok {
+            *slot = None;
+        }
+        ok
+    }
+}
+
+#[derive(Debug)]
+pub struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
+
+impl<E> From<E> for ApiError
+where
+    E: Into<anyhow::Error>,
+{
+    fn from(err: E) -> Self {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{:#}", err.into()),
+        )
+    }
+}
+
+pub fn resolve_data_dir() -> PathBuf {
+    if let Ok(v) = std::env::var("CARTOON_DATA_DIR") {
+        if !v.trim().is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    let mut cur = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    loop {
+        if cur.join("package.json").exists() && cur.join("src-tauri").exists() {
+            return cur.join("data");
+        }
+        if !cur.pop() {
+            break;
+        }
+    }
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return PathBuf::from(appdata).join("CartoonNotebook").join("data");
+    }
+    PathBuf::from("data")
+}
+
+pub fn resolve_port() -> u16 {
+    std::env::var("CARTOON_PORT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(DEFAULT_PORT)
+}
+
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/api/health", get(health))
+        .route("/api/index", get(index_json))
+        .route("/api/works", get(list_works).post(create_work))
+        .route(
+            "/api/works/:id",
+            get(get_work).patch(patch_work).delete(delete_work),
+        )
+        .route("/api/cover/:name", get(cover))
+        .route("/api/works/:id/media", get(list_media))
+        .route("/api/works/:id/media/upload", post(upload_media))
+        .route("/api/works/:id/media/import", post(import_media))
+        .route(
+            "/api/media/:id",
+            get(get_media).patch(patch_media).delete(delete_media),
+        )
+        .route("/api/media/:id/file", get(media_file))
+        .route("/api/media/:id/thumb", get(media_thumb))
+        .route("/api/tags", get(list_tags).post(create_tag))
+        .route("/api/tags/:id", patch(rename_tag).delete(delete_tag))
+        .route("/api/works/:id/tags", post(add_work_tag))
+        .route("/api/works/:id/tags/:tag_id", delete(remove_work_tag))
+        .route("/api/export", get(export_library))
+        .route("/api/export/download", get(export_download))
+        .route("/api/restore", post(restore_backup))
+        .route("/api/wallpapers", get(list_wallpapers))
+        .route("/api/wallpapers/:id/preview", get(wallpaper_preview))
+        .route("/api/wallpapers/:id/video", get(wallpaper_video))
+        .route("/api/wallpaper", get(get_wallpaper).patch(set_wallpaper))
+        .route("/api/pair", get(pair_info))
+        .route("/pair", get(pair_landing))
+        .fallback(spa)
+        .layer(middleware::from_fn_with_state(state.clone(), guard))
+        .layer(CorsLayer::permissive())
+        .with_state(state)
+}
+
+pub async fn serve(state: Arc<AppState>, host: &str, port: u16) -> anyhow::Result<()> {
+    let addr = format!("{host}:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    println!("[server] http://{addr}");
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}
+
+/// 本机（桌面应用）直接放行；局域网设备必须带 cookie
+async fn guard(
+    State(st): State<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    if !req.uri().path().starts_with("/api") {
+        return next.run(req).await;
+    }
+    if addr.ip().is_loopback() || has_valid_token(&st, req.headers()) {
+        return next.run(req).await;
+    }
+    ApiError::new(
+        StatusCode::UNAUTHORIZED,
+        "这台设备还没配对，请用电脑上的二维码打开一次",
+    )
+    .into_response()
+}
+
+fn has_valid_token(st: &AppState, headers: &HeaderMap) -> bool {
+    let Some(raw) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    raw.split(';')
+        .filter_map(|part| part.trim().split_once('='))
+        .any(|(k, v)| k == "cn_token" && v == st.phone_token)
+}
+
+fn mime_of(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or("") {
+        "html" => "text/html; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "svg" => "image/svg+xml",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 静态资源 + history 回退到 index.html
+async fn spa(uri: Uri) -> Response {
+    let raw = uri.path().trim_start_matches('/');
+    // 未知接口返回 JSON 404，不能让 SPA 兜底接管成一段 HTML
+    if raw == "api" || raw.starts_with("api/") {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "接口不存在" })),
+        )
+            .into_response();
+    }
+    let path = if raw.is_empty() { "index.html" } else { raw };
+
+    if let Some(file) = Assets::get(path) {
+        return (
+            [(header::CONTENT_TYPE, mime_of(path))],
+            file.data.into_owned(),
+        )
+            .into_response();
+    }
+    match Assets::get("index.html") {
+        Some(file) => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "前端资源没打进包里，先跑一次 npm run build",
+        )
+            .into_response(),
+    }
+}
+
+fn default_route_ip() -> Option<String> {
+    // 不会真的发包，只是让系统选出默认路由所在的网卡地址
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    Some(socket.local_addr().ok()?.ip().to_string())
+}
+
+/// 默认路由被 VPN 虚拟网卡抢走时，退回到 ipconfig 里找内网地址
+fn private_ip_from_ipconfig() -> Option<String> {
+    let out = std::process::Command::new("ipconfig").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut fallback: Option<String> = None;
+    for line in text.lines() {
+        let Some(pos) = line.find("IPv4") else { continue };
+        let Some(colon) = line[pos..].find(':') else { continue };
+        let raw = line[pos + colon + 1..].trim();
+        let ip = raw.trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.');
+        if ip.starts_with("192.168.") {
+            return Some(ip.to_string());
+        }
+        if fallback.is_none() && (ip.starts_with("10.") || ip.starts_with("172.")) {
+            fallback = Some(ip.to_string());
+        }
+    }
+    fallback
+}
+
+fn lan_ip() -> Option<String> {
+    if let Some(ip) = default_route_ip() {
+        if !ip.starts_with("127.") && !ip.starts_with("169.254.") {
+            return Some(ip);
+        }
+    }
+    private_ip_from_ipconfig()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairInfo {
+    pub url: String,
+    pub code: String,
+    pub lan_ip: Option<String>,
+    pub port: u16,
+    pub qr: String,
+}
+
+async fn pair_info(State(st): State<Arc<AppState>>) -> Result<Json<PairInfo>, ApiError> {
+    let code = st.fresh_pair_code();
+    let ip = lan_ip();
+    let host = ip.clone().unwrap_or_else(|| "127.0.0.1".to_string());
+    let url = format!("http://{host}:{}/pair?c={code}", st.port);
+
+    let qr = qrcode::QrCode::new(url.as_bytes())
+        .map(|code| {
+            code.render::<qrcode::render::svg::Color>()
+                .min_dimensions(220, 220)
+                .quiet_zone(true)
+                .build()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(PairInfo {
+        url,
+        code,
+        lan_ip: ip,
+        port: st.port,
+        qr,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct PairQuery {
+    pub c: Option<String>,
+}
+
+async fn pair_landing(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<PairQuery>,
+) -> Response {
+    let code = q.c.unwrap_or_default();
+    if !st.consume_pair_code(&code) {
+        return (
+            StatusCode::FORBIDDEN,
+            "配对码无效或已过期，请在电脑上重新生成",
+        )
+            .into_response();
+    }
+    let cookie = format!(
+        "cn_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000",
+        st.phone_token
+    );
+    (
+        [(header::SET_COOKIE, cookie)],
+        Redirect::to("/"),
+    )
+        .into_response()
+}
+
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }))
+}
+
+async fn index_json() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        INDEX_JSON,
+    )
+}
+
+async fn list_works(State(st): State<Arc<AppState>>) -> Result<Json<Vec<db::Work>>, ApiError> {
+    let works = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::list(&conn)?
+    };
+    Ok(Json(works))
+}
+
+async fn get_work(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<db::Work>, ApiError> {
+    let work = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::get(&conn, id)?
+    };
+    work.map(Json)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "作品不存在"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddWork {
+    pub anilist_id: Option<i64>,
+    pub bangumi_id: Option<i64>,
+    pub title_cn: Option<String>,
+    pub title_jp: Option<String>,
+    pub year: Option<i64>,
+}
+
+async fn create_work(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<AddWork>,
+) -> Result<Json<db::Work>, ApiError> {
+    if let Some(aid) = body.anilist_id {
+        let existing = {
+            let conn = st.db.lock().expect("db mutex poisoned");
+            db::find_by_anilist(&conn, aid)?
+        };
+        if let Some(w) = existing {
+            return Ok(Json(w));
+        }
+    }
+
+    // 联网补全失败不阻断入库
+    let mut meta = anilist::AnimeMeta::default();
+    if let Some(aid) = body.anilist_id {
+        match anilist::fetch(&st.http, aid).await {
+            Ok(m) => meta = m,
+            Err(e) => eprintln!("[anilist] 补全失败 #{aid}: {e:#}"),
+        }
+    }
+
+    let mut cover_path = None;
+    if let (Some(url), Some(aid)) = (&meta.cover_url, body.anilist_id) {
+        let file = format!("{aid}.jpg");
+        let dest = st.data_dir.join("covers").join(&file);
+        match anilist::download_cover(&st.http, url, &dest).await {
+            Ok(()) => cover_path = Some(file),
+            Err(e) => eprintln!("[cover] 下载失败 #{aid}: {e:#}"),
+        }
+    }
+
+    let title_cn = body
+        .title_cn
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| meta.title_native.clone())
+        .or_else(|| json_opt(&body.title_jp))
+        .or_else(|| meta.title_romaji.clone())
+        .unwrap_or_else(|| "未命名".to_string());
+
+    let new = db::NewWork {
+        anilist_id: body.anilist_id,
+        bangumi_id: body.bangumi_id,
+        title_cn,
+        title_jp: body.title_jp.or(meta.title_native),
+        title_en: meta.title_english.clone(),
+        year: body.year.or(meta.year),
+        format: meta.format.clone(),
+        episodes_total: meta.episodes,
+        cover_path,
+        synopsis: meta.description.clone(),
+        genres: if meta.genres.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&meta.genres).unwrap_or_default())
+        },
+    };
+
+    let work = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::insert(&conn, &new)?
+    };
+    Ok(Json(work))
+}
+
+async fn patch_work(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(patch): Json<db::WorkPatch>,
+) -> Result<Json<db::Work>, ApiError> {
+    let work = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::update(&conn, id, &patch)?
+    };
+    work.map(Json)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "作品不存在"))
+}
+
+async fn delete_work(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ok = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::delete(&conn, id)?
+    };
+    if ok {
+        Ok(Json(json!({ "ok": true })))
+    } else {
+        Err(ApiError::new(StatusCode::NOT_FOUND, "作品不存在"))
+    }
+}
+
+async fn cover(
+    State(st): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Response, ApiError> {
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "非法文件名"));
+    }
+    let path = st.data_dir.join("covers").join(&name);
+    let bytes = tokio::fs::read(&path).await.map_err(|_| {
+        ApiError::new(StatusCode::NOT_FOUND, "封面不存在")
+    })?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+fn json_opt(v: &Option<String>) -> Option<String> {
+    v.as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+// ---------------- 素材 ----------------
+
+const VIDEO_EXT: [&str; 7] = ["mp4", "webm", "mov", "mkv", "avi", "m4v", "wmv"];
+
+fn kind_of(ext: &str) -> &'static str {
+    if VIDEO_EXT.contains(&ext) {
+        "video"
+    } else {
+        "image"
+    }
+}
+
+fn media_abs(st: &AppState, m: &db::Media) -> PathBuf {
+    // 归档模式存相对路径，引用模式存绝对路径
+    if m.storage == "ref" {
+        PathBuf::from(&m.path)
+    } else {
+        st.data_dir.join(&m.path)
+    }
+}
+
+fn stamp_name() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{nanos:x}")
+}
+
+fn ext_of(file_name: &str, content_type: Option<&str>) -> String {
+    if let Some(ext) = file_name.rsplit('.').next() {
+        let ok = !ext.is_empty()
+            && ext.len() <= 5
+            && ext != file_name
+            && ext.chars().all(|c| c.is_ascii_alphanumeric());
+        if ok {
+            return ext.to_lowercase();
+        }
+    }
+    let ext = match content_type.unwrap_or("") {
+        "image/png" => "png",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/jpeg" => "jpg",
+        "video/webm" => "webm",
+        "video/quicktime" => "mov",
+        "video/x-matroska" => "mkv",
+        "video/x-msvideo" => "avi",
+        _ => "bin",
+    };
+    ext.to_string()
+}
+
+/// 边收边写，几百 MB 的视频也不会进内存
+async fn write_field(
+    field: &mut axum::extract::multipart::Field<'_>,
+    path: &std::path::Path,
+) -> anyhow::Result<i64> {
+    let mut file = tokio::fs::File::create(path).await?;
+    let mut total = 0i64;
+    while let Some(chunk) = field.chunk().await? {
+        file.write_all(&chunk).await?;
+        total += chunk.len() as i64;
+    }
+    file.flush().await?;
+    Ok(total)
+}
+
+async fn list_media(
+    State(st): State<Arc<AppState>>,
+    Path(work_id): Path<i64>,
+) -> Result<Json<Vec<db::Media>>, ApiError> {
+    let items = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::list_media(&conn, work_id)?
+    };
+    Ok(Json(items))
+}
+
+async fn get_media(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<db::Media>, ApiError> {
+    let media = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::get_media(&conn, id)?
+    };
+    media
+        .map(Json)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "素材不存在"))
+}
+
+async fn upload_media(
+    State(st): State<Arc<AppState>>,
+    Path(work_id): Path<i64>,
+    mut mp: Multipart,
+) -> Result<Json<db::Media>, ApiError> {
+    {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        if db::get(&conn, work_id)?.is_none() {
+            return Err(ApiError::new(StatusCode::NOT_FOUND, "作品不存在"));
+        }
+    }
+
+    let dir = st.data_dir.join("media").join(work_id.to_string());
+    tokio::fs::create_dir_all(&dir).await?;
+    let base = stamp_name();
+
+    let mut kind = String::new();
+    let mut storage = "archive".to_string();
+    let mut stamp: Option<f64> = None;
+    let mut duration: Option<f64> = None;
+    let mut main: Option<(String, i64)> = None;
+    let mut thumb: Option<String> = None;
+    let mut poster: Option<String> = None;
+    let mut ext = String::new();
+
+    while let Some(mut field) = mp
+        .next_field()
+        .await
+        .map_err(|e| anyhow::anyhow!("解析上传失败: {e}"))?
+    {
+        let name = field.name().unwrap_or_default().to_string();
+        match name.as_str() {
+            "kind" => kind = field.text().await.unwrap_or_default(),
+            "storage" => {
+                let v = field.text().await.unwrap_or_default();
+                if v == "ref" || v == "archive" {
+                    storage = v;
+                }
+            }
+            "stamp" => stamp = field.text().await.ok().and_then(|v| v.trim().parse().ok()),
+            "duration" => duration = field.text().await.ok().and_then(|v| v.trim().parse().ok()),
+            "file" => {
+                let fname = field.file_name().map(str::to_string).unwrap_or_default();
+                let ctype = field.content_type().map(str::to_string);
+                ext = ext_of(&fname, ctype.as_deref());
+                let abs = dir.join(format!("{base}.{ext}"));
+                let bytes = write_field(&mut field, &abs).await?;
+                main = Some((format!("media/{work_id}/{base}.{ext}"), bytes));
+            }
+            "thumb" => {
+                let abs = dir.join(format!("{base}.thumb.jpg"));
+                write_field(&mut field, &abs).await?;
+                thumb = Some(format!("media/{work_id}/{base}.thumb.jpg"));
+            }
+            "poster" => {
+                let abs = dir.join(format!("{base}.poster.jpg"));
+                write_field(&mut field, &abs).await?;
+                poster = Some(format!("media/{work_id}/{base}.poster.jpg"));
+            }
+            _ => {
+                let _ = field.bytes().await;
+            }
+        }
+    }
+
+    let Some((path, bytes)) = main else {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "没有收到文件"));
+    };
+    if kind.is_empty() {
+        kind = kind_of(&ext).to_string();
+    }
+
+    let media = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::insert_media(
+            &conn,
+            &db::NewMedia {
+                work_id,
+                kind,
+                storage,
+                path,
+                thumb,
+                poster,
+                bytes: Some(bytes),
+                duration,
+                stamp,
+            },
+        )?
+    };
+    Ok(Json(media))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ImportMediaBody {
+    pub path: String,
+    /// ref = 只登记路径；archive = 复制进库。缺省跟随作品设置
+    pub mode: Option<String>,
+}
+
+/// 按本机路径导入：拖拽文件进来时走这里。
+/// 归档模式由服务端直接复制，不用把文件内容经浏览器传一遍。
+async fn import_media(
+    State(st): State<Arc<AppState>>,
+    Path(work_id): Path<i64>,
+    Json(body): Json<ImportMediaBody>,
+) -> Result<Json<db::Media>, ApiError> {
+    let work = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::get(&conn, work_id)?
+    };
+    let Some(work) = work else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "作品不存在"));
+    };
+
+    let abs = PathBuf::from(body.path.trim());
+    if !abs.is_file() {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "这个路径不是文件，或者已经不存在",
+        ));
+    }
+    let ext = abs
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let kind = kind_of(&ext).to_string();
+    let mode = body.mode.unwrap_or_else(|| work.media_mode.clone());
+    let bytes = std::fs::metadata(&abs).ok().map(|m| m.len() as i64);
+
+    let (storage, path) = if mode == "ref" {
+        ("ref".to_string(), abs.to_string_lossy().to_string())
+    } else {
+        let dir = st.data_dir.join("media").join(work_id.to_string());
+        tokio::fs::create_dir_all(&dir).await?;
+        let name = format!("{}.{}", stamp_name(), if ext.is_empty() { "bin" } else { &ext });
+        tokio::fs::copy(&abs, dir.join(&name)).await?;
+        (
+            "archive".to_string(),
+            format!("media/{work_id}/{name}"),
+        )
+    };
+
+    let media = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::insert_media(
+            &conn,
+            &db::NewMedia {
+                work_id,
+                kind,
+                storage,
+                path,
+                thumb: None,
+                poster: None,
+                bytes,
+                duration: None,
+                stamp: None,
+            },
+        )?
+    };
+    Ok(Json(media))
+}
+
+/// 带 Range 的文件流，视频拖动进度条靠它
+async fn media_file(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    let media = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::get_media(&conn, id)?
+    };
+    let Some(m) = media else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "素材不存在"));
+    };
+
+    let abs = media_abs(&st, &m);
+    if !abs.is_file() {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::set_media_missing(&conn, id, true)?;
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "原文件不在了，可能被移动或删除",
+        ));
+    }
+    if m.missing != 0 {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::set_media_missing(&conn, id, false)?;
+    }
+
+    let res = ServeFile::new(abs)
+        .oneshot(req)
+        .await
+        .expect("ServeFile 不会失败");
+    Ok(res.into_response())
+}
+
+async fn media_thumb(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Response, ApiError> {
+    let media = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::get_media(&conn, id)?
+    };
+    let Some(m) = media else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "素材不存在"));
+    };
+    let Some(rel) = m.thumb.clone().or_else(|| m.poster.clone()) else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "没有缩略图"));
+    };
+    let abs = st.data_dir.join(rel);
+    let bytes = tokio::fs::read(&abs)
+        .await
+        .map_err(|_| ApiError::new(StatusCode::NOT_FOUND, "缩略图不存在"))?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/jpeg"),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MediaPatch {
+    pub caption: Option<String>,
+    /// 0 表示清空集号
+    pub episode: Option<i64>,
+    /// 播放进度（秒），续播用
+    pub position: Option<f64>,
+    /// 引用模式改路径（文件被移动后重新指回去）
+    pub path: Option<String>,
+}
+
+async fn patch_media(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(patch): Json<MediaPatch>,
+) -> Result<Json<db::Media>, ApiError> {
+    let conn = st.db.lock().expect("db mutex poisoned");
+    let Some(cur) = db::get_media(&conn, id)? else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "素材不存在"));
+    };
+
+    if let Some(raw) = patch
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if cur.storage != "ref" {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "只有引用模式的素材能改路径，归档素材请重新导入",
+            ));
+        }
+        let abs = PathBuf::from(raw);
+        if !abs.is_file() {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "这个路径不是文件，或者已经不存在",
+            ));
+        }
+        let ext = abs
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        let size = std::fs::metadata(&abs).ok().map(|m| m.len() as i64);
+        db::set_media_path(&conn, id, &abs.to_string_lossy(), size, kind_of(&ext))?;
+    }
+
+    if let Some(ep) = patch.episode {
+        // 0 或负数视为"清空"
+        db::set_media_episode(&conn, id, if ep <= 0 { None } else { Some(ep) })?;
+    }
+    if let Some(pos) = patch.position {
+        db::set_media_position(&conn, id, pos.max(0.0))?;
+    }
+    if let Some(caption) = patch.caption.clone() {
+        db::set_media_caption(&conn, id, Some(caption))?;
+    }
+
+    let media = db::get_media(&conn, id)?;
+    drop(conn);
+    media
+        .map(Json)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "素材不存在"))
+}
+
+// ---------------- 标签 ----------------
+
+async fn list_tags(State(st): State<Arc<AppState>>) -> Result<Json<Vec<db::Tag>>, ApiError> {
+    let tags = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::list_tags(&conn)?
+    };
+    Ok(Json(tags))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TagBody {
+    pub name: String,
+}
+
+async fn create_tag(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<TagBody>,
+) -> Result<Json<db::Tag>, ApiError> {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "标签名不能为空"));
+    }
+    let conn = st.db.lock().expect("db mutex poisoned");
+    conn.execute("INSERT OR IGNORE INTO tags (name) VALUES (?1)", [&name])?;
+    let tag = conn.query_row(
+        "SELECT t.id, t.name, (SELECT COUNT(*) FROM work_tags wt WHERE wt.tag_id = t.id)
+         FROM tags t WHERE t.name = ?1",
+        [&name],
+        |r| {
+            Ok(db::Tag {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                count: r.get(2)?,
+            })
+        },
+    )?;
+    Ok(Json(tag))
+}
+
+async fn rename_tag(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+    Json(body): Json<TagBody>,
+) -> Result<Json<db::Tag>, ApiError> {
+    let tag = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::rename_tag(&conn, id, &body.name)?
+    };
+    tag.map(Json)
+        .ok_or_else(|| ApiError::new(StatusCode::BAD_REQUEST, "标签名不能为空"))
+}
+
+async fn delete_tag(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ok = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::delete_tag(&conn, id)?
+    };
+    if !ok {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "标签不存在"));
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// 直接给作品加标签，标签不存在就建
+async fn add_work_tag(
+    State(st): State<Arc<AppState>>,
+    Path(work_id): Path<i64>,
+    Json(body): Json<TagBody>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let tags = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        if db::get(&conn, work_id)?.is_none() {
+            return Err(ApiError::new(StatusCode::NOT_FOUND, "作品不存在"));
+        }
+        db::add_work_tag(&conn, work_id, &body.name)?
+    };
+    Ok(Json(tags))
+}
+
+async fn remove_work_tag(
+    State(st): State<Arc<AppState>>,
+    Path((work_id, tag_id)): Path<(i64, i64)>,
+) -> Result<Json<Vec<String>>, ApiError> {
+    let tags = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::remove_work_tag(&conn, work_id, tag_id)?
+    };
+    Ok(Json(tags))
+}
+
+async fn delete_media(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let media = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::get_media(&conn, id)?
+    };
+    let Some(m) = media else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "素材不存在"));
+    };
+
+    // 归档文件先移进 .trash，不直接销毁；引用模式不碰用户的原文件
+    if m.storage == "archive" {
+        let trash = st.data_dir.join(".trash");
+        tokio::fs::create_dir_all(&trash).await?;
+        let rels = [Some(m.path.clone()), m.thumb.clone(), m.poster.clone()];
+        for rel in rels.into_iter().flatten() {
+            let abs = st.data_dir.join(&rel);
+            if abs.is_file() {
+                if let Some(name) = abs.file_name().map(|s| s.to_string_lossy().to_string()) {
+                    let dest = trash.join(format!("{}-{name}", stamp_name()));
+                    let _ = tokio::fs::rename(&abs, dest).await;
+                }
+            }
+        }
+    }
+
+    {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::delete_media(&conn, id)?;
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+// ---------------- 导出 / 备份 ----------------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportInfo {
+    pub name: String,
+    pub bytes: i64,
+    pub works: i64,
+    pub media: i64,
+    pub created_at: String,
+}
+
+fn prune_exports(dir: &std::path::Path, keep: usize) {
+    let mut zips: Vec<PathBuf> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "zip").unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default();
+    zips.sort();
+    while zips.len() > keep {
+        let old = zips.remove(0);
+        let _ = std::fs::remove_file(old);
+    }
+}
+
+fn add_zip_dir(
+    zw: &mut zip::ZipWriter<std::fs::File>,
+    dir: &std::path::Path,
+    prefix: &str,
+    opts: zip::write::SimpleFileOptions,
+) -> anyhow::Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        zw.start_file(format!("{prefix}/{name}"), opts)?;
+        let mut f = std::fs::File::open(entry.path())?;
+        std::io::copy(&mut f, zw)?;
+    }
+    Ok(())
+}
+
+fn build_zip(
+    data_dir: &std::path::Path,
+    snapshot: &std::path::Path,
+    out: &std::path::Path,
+    manifest: &str,
+) -> anyhow::Result<i64> {
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(out)?;
+    let mut zw = zip::ZipWriter::new(file);
+    let deflate = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    // 封面和视频本身已压缩，再 deflate 纯属浪费 CPU
+    let stored = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+
+    zw.start_file("manifest.json", deflate)?;
+    std::io::Write::write_all(&mut zw, manifest.as_bytes())?;
+
+    zw.start_file("library.db", deflate)?;
+    let mut db_file = std::fs::File::open(snapshot)?;
+    std::io::copy(&mut db_file, &mut zw)?;
+
+    add_zip_dir(&mut zw, &data_dir.join("covers"), "covers", stored)?;
+
+    let media_root = data_dir.join("media");
+    if media_root.is_dir() {
+        for entry in std::fs::read_dir(&media_root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                add_zip_dir(&mut zw, &entry.path(), &format!("media/{name}"), stored)?;
+            }
+        }
+    }
+
+    zw.finish()?;
+    Ok(std::fs::metadata(out)?.len() as i64)
+}
+
+async fn export_library(State(st): State<Arc<AppState>>) -> Result<Json<ExportInfo>, ApiError> {
+    let dir = st.data_dir.join(".exports");
+    tokio::fs::create_dir_all(&dir).await?;
+
+    let (stamp, works, refs) = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        let stamp: String = conn.query_row(
+            "SELECT strftime('%Y%m%d-%H%M','now','localtime')",
+            [],
+            |r| r.get(0),
+        )?;
+        (stamp, db::count(&conn)?, db::list_media_refs(&conn)?)
+    };
+
+    // VACUUM INTO 在 WAL 模式下也能拿到一致快照，比直接拷 .db 稳
+    let snapshot = dir.join(format!("library-{stamp}.db"));
+    {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        let _ = std::fs::remove_file(&snapshot);
+        conn.execute(
+            "VACUUM INTO ?1",
+            rusqlite::params![snapshot.to_string_lossy().to_string()],
+        )?;
+    }
+
+    let manifest = json!({
+        "app": "动漫档案馆",
+        "version": env!("CARGO_PKG_VERSION"),
+        "exportedAt": stamp,
+        "works": works,
+        "mediaCount": refs.len(),
+        "layout": {
+            "library.db": "SQLite 快照，含作品/标签/素材索引",
+            "covers/": "封面图",
+            "media/": "归档模式下复制进来的文件",
+            "manifest.json": "本文件"
+        },
+        "mediaRefs": refs,
+        "note": "引用模式的素材没有复制文件，mediaRefs 里保留了原始绝对路径，换机后可据此重连",
+    });
+
+    let out = dir.join(format!("library-{stamp}.zip"));
+    let data_dir = st.data_dir.clone();
+    let snap = snapshot.clone();
+    let out2 = out.clone();
+    let manifest_str = serde_json::to_string_pretty(&manifest)?;
+
+    let bytes = tokio::task::spawn_blocking(move || {
+        build_zip(&data_dir, &snap, &out2, &manifest_str)
+    })
+    .await??;
+
+    let _ = std::fs::remove_file(&snapshot);
+    prune_exports(&dir, 3);
+
+    Ok(Json(ExportInfo {
+        name: format!("library-{stamp}.zip"),
+        bytes,
+        works,
+        media: refs.len() as i64,
+        created_at: stamp,
+    }))
+}
+
+/// 下载最近一次导出的 zip
+async fn export_download(
+    State(st): State<Arc<AppState>>,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    let dir = st.data_dir.join(".exports");
+    let mut zips: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().map(|x| x == "zip").unwrap_or(false))
+                .collect()
+        })
+        .unwrap_or_default();
+    zips.sort();
+    let Some(path) = zips.pop() else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "还没有导出过"));
+    };
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "library.zip".to_string());
+
+    let mut res = ServeFile::new(path)
+        .oneshot(req)
+        .await
+        .expect("ServeFile 不会失败")
+        .into_response();
+    res.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        format!("attachment; filename=\"{name}\"").parse().expect("header 合法"),
+    );
+    Ok(res)
+}
+
+// ---------------- Wallpaper Engine 壁纸 ----------------
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Wallpaper {
+    /// 创意工坊 id，同时当作对外的不透明标识
+    pub id: String,
+    pub title: String,
+    /// video / scene / web
+    pub kind: String,
+    /// 只有 video 类型才有，绝对路径
+    pub video: Option<String>,
+    pub preview: Option<String>,
+    pub tags: Vec<String>,
+    pub bytes: i64,
+}
+
+/// 背景的显示参数，和"选了哪个壁纸"一起存进 settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WallpaperConfig {
+    pub id: Option<String>,
+    /// 临时开关：关掉但保留选择
+    pub enabled: bool,
+    /// 薄纱浓度 0..1
+    pub veil: f64,
+    /// 模糊像素 0..24
+    pub blur: f64,
+    /// cover / contain
+    pub fit: String,
+}
+
+impl Default for WallpaperConfig {
+    fn default() -> Self {
+        Self {
+            id: None,
+            enabled: true,
+            veil: 0.8,
+            blur: 3.0,
+            fit: "cover".to_string(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperState {
+    #[serde(flatten)]
+    pub config: WallpaperConfig,
+    pub title: Option<String>,
+    pub kind: Option<String>,
+    /// 有没有预览图（场景壁纸只有这个能当静态背景）
+    pub has_preview: bool,
+    /// 是不是能动的视频
+    pub has_video: bool,
+}
+
+const WALLPAPER_KEY: &str = "wallpaper_config";
+
+fn load_config(st: &AppState) -> WallpaperConfig {
+    let conn = st.db.lock().expect("db mutex poisoned");
+    if let Ok(Some(raw)) = db::get_setting(&conn, WALLPAPER_KEY) {
+        if let Ok(cfg) = serde_json::from_str::<WallpaperConfig>(&raw) {
+            return cfg;
+        }
+    }
+    // 兼容早期只存了 id 的格式
+    if let Ok(Some(id)) = db::get_setting(&conn, "wallpaper") {
+        return WallpaperConfig {
+            id: Some(id),
+            ..WallpaperConfig::default()
+        };
+    }
+    WallpaperConfig::default()
+}
+
+fn save_config(st: &AppState, cfg: &WallpaperConfig) -> anyhow::Result<()> {
+    let conn = st.db.lock().expect("db mutex poisoned");
+    let raw = serde_json::to_string(cfg)?;
+    db::set_setting(&conn, WALLPAPER_KEY, &raw)?;
+    // 老字段清掉，避免两处状态打架
+    let _ = conn.execute("DELETE FROM settings WHERE key = 'wallpaper'", []);
+    Ok(())
+}
+
+fn steam_roots() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    // 注册表里最准；cmd 输出是 GBK，这里只找 "SteamPath" 那行的路径片段
+    if let Ok(out) = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"])
+        .output()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Some(idx) = text.find("REG_SZ") {
+            let p = text[idx + 6..].lines().next().unwrap_or("").trim();
+            if !p.is_empty() {
+                roots.push(PathBuf::from(p.replace('/', "\\")));
+            }
+        }
+    }
+
+    for guess in [
+        r"C:/Program Files (x86)/Steam",
+        r"C:/Program Files/Steam",
+        r"D:/Steam",
+        r"E:/Steam",
+    ] {
+        let p = PathBuf::from(guess);
+        if p.is_dir() {
+            roots.push(p);
+        }
+    }
+
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn library_roots() -> Vec<PathBuf> {
+    let mut libs = Vec::new();
+    for root in steam_roots() {
+        if root.is_dir() {
+            libs.push(root.clone());
+        }
+        let vdf = root.join("steamapps").join("libraryfolders.vdf");
+        if let Ok(text) = std::fs::read_to_string(&vdf) {
+            for line in text.lines() {
+                let t = line.trim();
+                if !t.starts_with("\"path\"") {
+                    continue;
+                }
+                let parts: Vec<&str> = t.split('"').collect();
+                if parts.len() >= 4 {
+                    let p = parts[3].replace("\\\\", "\\");
+                    if !p.trim().is_empty() {
+                        libs.push(PathBuf::from(p));
+                    }
+                }
+            }
+        }
+    }
+    libs.sort();
+    libs.dedup();
+    libs
+}
+
+fn scan_wallpapers() -> Vec<Wallpaper> {
+    let mut out: Vec<Wallpaper> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for lib in library_roots() {
+        let ws = lib
+            .join("steamapps")
+            .join("workshop")
+            .join("content")
+            .join("431960");
+        let Ok(entries) = std::fs::read_dir(&ws) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+
+            let Ok(text) = std::fs::read_to_string(dir.join("project.json")) else {
+                continue;
+            };
+            let text = text.trim_start_matches('\u{feff}');
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
+                continue;
+            };
+
+            let kind = v
+                .get("type")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            let title = v
+                .get("title")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| id.clone());
+            let file = v.get("file").and_then(|x| x.as_str()).unwrap_or("");
+            let preview = v.get("preview").and_then(|x| x.as_str()).unwrap_or("");
+            let tags = v
+                .get("tags")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let video = if kind == "video" && !file.is_empty() {
+                let p = dir.join(file);
+                p.is_file().then(|| p.to_string_lossy().to_string())
+            } else {
+                None
+            };
+            let bytes = video
+                .as_ref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.len() as i64)
+                .unwrap_or(0);
+            let preview_abs = if preview.is_empty() {
+                None
+            } else {
+                let p = dir.join(preview);
+                p.is_file().then(|| p.to_string_lossy().to_string())
+            };
+
+            out.push(Wallpaper {
+                id,
+                title,
+                kind,
+                video,
+                preview: preview_abs,
+                tags,
+                bytes,
+            });
+        }
+    }
+
+    out.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    out
+}
+
+fn find_wallpaper(st: &AppState, id: &str) -> Option<Wallpaper> {
+    let mut cache = st.wallpapers.lock().expect("wallpaper mutex poisoned");
+    if cache.is_empty() {
+        *cache = scan_wallpapers();
+    }
+    cache.iter().find(|w| w.id == id).cloned()
+}
+
+fn current_wallpaper(st: &AppState) -> WallpaperState {
+    let config = load_config(st);
+    let found = config.id.as_deref().and_then(|i| find_wallpaper(st, i));
+    WallpaperState {
+        title: found.as_ref().map(|w| w.title.clone()),
+        kind: found.as_ref().map(|w| w.kind.clone()),
+        has_preview: found.as_ref().map(|w| w.preview.is_some()).unwrap_or(false),
+        has_video: found.as_ref().map(|w| w.video.is_some()).unwrap_or(false),
+        config,
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RefreshQuery {
+    pub refresh: Option<String>,
+}
+
+async fn list_wallpapers(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<RefreshQuery>,
+) -> Result<Json<Vec<Wallpaper>>, ApiError> {
+    let need_scan = {
+        let cache = st.wallpapers.lock().expect("wallpaper mutex poisoned");
+        cache.is_empty() || q.refresh.as_deref() == Some("1")
+    };
+    if need_scan {
+        let list = tokio::task::spawn_blocking(scan_wallpapers).await?;
+        let mut cache = st.wallpapers.lock().expect("wallpaper mutex poisoned");
+        *cache = list;
+    }
+    let list = {
+        let cache = st.wallpapers.lock().expect("wallpaper mutex poisoned");
+        cache.clone()
+    };
+    Ok(Json(list))
+}
+
+async fn wallpaper_preview(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let w = find_wallpaper(&st, &id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "壁纸不存在"))?;
+    let Some(preview) = w.preview else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "这个壁纸没有预览图"));
+    };
+    let bytes = tokio::fs::read(&preview)
+        .await
+        .map_err(|_| ApiError::new(StatusCode::NOT_FOUND, "预览图读不到"))?;
+    let mime = if preview.to_lowercase().ends_with(".gif") {
+        "image/gif"
+    } else {
+        "image/jpeg"
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, mime),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+async fn wallpaper_video(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    let w = find_wallpaper(&st, &id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "壁纸不存在"))?;
+    let Some(video) = w.video else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "这个壁纸不是视频类型，没法当背景播放",
+        ));
+    };
+    if !PathBuf::from(&video).is_file() {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "视频文件不在了"));
+    }
+    let res = ServeFile::new(video)
+        .oneshot(req)
+        .await
+        .expect("ServeFile 不会失败");
+    Ok(res.into_response())
+}
+
+async fn get_wallpaper(State(st): State<Arc<AppState>>) -> Json<WallpaperState> {
+    let state = tokio::task::spawn_blocking(move || current_wallpaper(&st))
+        .await
+        .unwrap_or(WallpaperState {
+            config: WallpaperConfig::default(),
+            title: None,
+            kind: None,
+            has_preview: false,
+            has_video: false,
+        });
+    Json(state)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperPatch {
+    /// 传 id 选中；传空串清空；不传则保持不变
+    pub id: Option<String>,
+    pub enabled: Option<bool>,
+    pub veil: Option<f64>,
+    pub blur: Option<f64>,
+    pub fit: Option<String>,
+}
+
+async fn set_wallpaper(
+    State(st): State<Arc<AppState>>,
+    Json(patch): Json<WallpaperPatch>,
+) -> Result<Json<WallpaperState>, ApiError> {
+    let mut cfg = load_config(&st);
+
+    if let Some(id) = patch.id {
+        let id = id.trim().to_string();
+        cfg.id = if id.is_empty() { None } else { Some(id) };
+    }
+    if let Some(v) = patch.enabled {
+        cfg.enabled = v;
+    }
+    if let Some(v) = patch.veil {
+        cfg.veil = v.clamp(0.0, 1.0);
+    }
+    if let Some(v) = patch.blur {
+        cfg.blur = v.clamp(0.0, 24.0);
+    }
+    if let Some(v) = patch.fit {
+        cfg.fit = if v == "contain" { "contain".into() } else { "cover".into() };
+    }
+
+    save_config(&st, &cfg)?;
+    let state = tokio::task::spawn_blocking(move || current_wallpaper(&st)).await?;
+    Ok(Json(state))
+}
+
+// ---------------- 窗口状态记忆 ----------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct WindowCfg {
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+    pub maximized: bool,
+}
+
+const WINDOW_KEY: &str = "window_state";
+
+pub fn load_window_cfg(st: &AppState) -> Option<WindowCfg> {
+    let conn = st.db.lock().expect("db mutex poisoned");
+    let raw = db::get_setting(&conn, WINDOW_KEY).ok().flatten()?;
+    serde_json::from_str(&raw).ok()
+}
+
+pub fn save_window_state(st: &AppState, window: &tauri::Window) {
+    let pos = match window.outer_position() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let size = match window.inner_size() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let cfg = WindowCfg {
+        x: pos.x,
+        y: pos.y,
+        w: size.width,
+        h: size.height,
+        maximized: window.is_maximized().unwrap_or(false),
+    };
+    if let Ok(raw) = serde_json::to_string(&cfg) {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        let _ = db::set_setting(&conn, WINDOW_KEY, &raw);
+    }
+}
+
+// ---------------- 从备份恢复 ----------------
+
+/// 启动时（打开数据库之前）如果有待恢复的备份包，整包替换当前数据。
+/// 当前数据会先挪进 .restore-backup-<时间戳>，删错了还能捞回来。
+pub fn apply_pending_restore(data_dir: &std::path::Path) {
+    let pending = data_dir.join(".restore-pending");
+    if !pending.join("library.db").is_file() {
+        return;
+    }
+    println!("[restore] 发现待恢复的备份，正在替换当前数据…");
+
+    let backup = data_dir.join(format!(".restore-backup-{}", stamp_name()));
+    let _ = std::fs::create_dir_all(&backup);
+    for name in ["library.db", "library.db-wal", "library.db-shm", "covers", "media"] {
+        let cur = data_dir.join(name);
+        if cur.exists() {
+            let _ = std::fs::rename(&cur, backup.join(name));
+        }
+    }
+
+    for entry in std::fs::read_dir(&pending).expect("读恢复目录失败") {
+        let entry = entry.expect("entry");
+        let target = data_dir.join(entry.file_name());
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            let _ = std::fs::remove_dir_all(&target);
+        }
+        let _ = std::fs::rename(entry.path(), &target);
+    }
+    let _ = std::fs::remove_dir_all(&pending);
+    println!("[restore] 完成，原数据备份在 {}", backup.display());
+}
+
+async fn restore_backup(
+    State(st): State<Arc<AppState>>,
+    mut mp: Multipart,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let pending = st.data_dir.join(".restore-pending");
+    let incoming = st.data_dir.join(".restore-incoming.zip");
+    tokio::fs::create_dir_all(&pending).await?;
+
+    // 边收边写，几个 GB 的备份也不会撑爆内存
+    let mut found = false;
+    {
+        let mut f = tokio::fs::File::create(&incoming).await?;
+        while let Some(mut field) = mp
+            .next_field()
+            .await
+            .map_err(|e| anyhow::anyhow!("解析上传失败: {e}"))?
+        {
+            if field.name() == Some("file") {
+                found = true;
+                while let Some(chunk) = field.chunk().await? {
+                    f.write_all(&chunk).await?;
+                }
+            } else {
+                let _ = field.bytes().await;
+            }
+        }
+        f.flush().await?;
+    }
+    if !found {
+        let _ = std::fs::remove_file(&incoming);
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "没有收到备份文件"));
+    }
+
+    let incoming2 = incoming.clone();
+    let pending2 = pending.clone();
+    let result = tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let f = std::fs::File::open(&incoming2).map_err(|e| e.to_string())?;
+        let mut z = zip::ZipArchive::new(f).map_err(|e| format!("不是有效的 zip：{e}"))?;
+
+        let (mut has_db, mut has_manifest) = (false, false);
+        for i in 0..z.len() {
+            match z.name_for_index(i) {
+                Some("library.db") => has_db = true,
+                Some("manifest.json") => has_manifest = true,
+                _ => {}
+            }
+        }
+        if !has_db || !has_manifest {
+            return Err("这不是动漫档案馆的备份包（缺 manifest.json 或 library.db）".into());
+        }
+
+        let _ = std::fs::remove_dir_all(&pending2);
+        std::fs::create_dir_all(&pending2).map_err(|e| e.to_string())?;
+
+        for i in 0..z.len() {
+            let mut f = z.by_index(i).map_err(|e| e.to_string())?;
+            let name = f.name().to_string();
+            if name.ends_with('/') || name.contains("..") || name.starts_with('/') {
+                continue;
+            }
+            // 白名单：只认认识的东西，别的直接跳过
+            if !(name == "manifest.json"
+                || name == "library.db"
+                || name.starts_with("covers/")
+                || name.starts_with("media/"))
+            {
+                continue;
+            }
+            let dest = pending2.join(&name);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let mut out = std::fs::File::create(&dest).map_err(|e| e.to_string())?;
+            std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    let _ = std::fs::remove_file(&incoming);
+    if let Err(msg) = result {
+        let _ = std::fs::remove_dir_all(&pending);
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, msg));
+    }
+
+    Ok(Json(json!({ "ok": true, "requiresRestart": true })))
+}

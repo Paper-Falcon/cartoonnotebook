@@ -1,0 +1,16 @@
+node_modules
+dist
+dist-ssr
+.toolchain
+src-tauri/target
+data
+*.local
+.DS_Store
+*.log
+.cache
+.shots
+src-tauri/gen
+app
+.testdata
+.workbuddy
+tsconfig.tsbuildinfo
