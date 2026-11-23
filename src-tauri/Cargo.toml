@@ -7,6 +7,8 @@ rust-version = "1.77"
 # 有两个 bin（应用本身与 devserver），告诉 cargo run 默认跑哪个
 default-run = "cartoonnotebook"
 
+autobins = false
+
 [lib]
 name = "cartoonnotebook_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -18,6 +20,7 @@ path = "src/main.rs"
 [[bin]]
 name = "devserver"
 path = "src/bin/devserver.rs"
+required-features = ["devserver"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -40,6 +43,10 @@ rand = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # 调试信息降到 1 级：保留行号，内存占用小一半，这台机器内存紧张时编译不会被 OOM 杀掉
+[features]
+# 加上这个 feature 才会编译 devserver（接口测试工具，打包时不需要）
+devserver = []
+
 [profile.dev]
 debug = 1
 
