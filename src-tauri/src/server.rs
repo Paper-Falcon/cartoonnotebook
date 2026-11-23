@@ -1409,6 +1409,80 @@ fn library_roots() -> Vec<PathBuf> {
     libs
 }
 
+/// WebView2 能否可靠播放这个视频；拿不准就退回静态预览。
+/// H.264 的 10bit/422 档（动漫圈常见）和 HEVC 浏览器基本放不了。
+fn video_playable(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = Vec::new();
+    if f.take(6 * 1024 * 1024).read_to_end(&mut head).is_err() {
+        return false;
+    }
+
+    let find = |needle: &[u8]| -> Option<usize> {
+        if needle.len() <= head.len() {
+            head.windows(needle.len()).position(|w| w == needle)
+        } else {
+            None
+        }
+    };
+
+    // WebM/EBML：codec id 是明文字符串
+    if head.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]) {
+        return find(b"V_VP9").is_some()
+            || find(b"V_VP8").is_some()
+            || find(b"V_AV1").is_some();
+    }
+
+    // HEVC：要装系统扩展，别赌
+    if find(b"hev1").is_some() || find(b"hvc1").is_some() {
+        return false;
+    }
+    // AV1 / VP9：Edge 内核原生支持
+    if find(b"av01").is_some() || find(b"vp09").is_some() || find(b"vp08").is_some() {
+        return true;
+    }
+    // H.264：看 avcC 里的 profile_idc
+    if let Some(i) = find(b"avcC") {
+        if i + 6 <= head.len() {
+            let profile = head[i + 5];
+            // 110=High10, 122=High422, 138/244=更冷门的档
+            return !matches!(profile, 110 | 122 | 138 | 244);
+        }
+    }
+    find(b"avc1").is_some() || find(b"avc3").is_some()
+}
+
+/// 目录里找一张能当预览的图：优先 preview.*，否则第一张图
+fn fallback_preview(dir: &std::path::Path) -> Option<String> {
+    let mut first: Option<String> = None;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return None;
+    };
+    for entry in entries.flatten() {
+        let p = entry.path();
+        let ext = p
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if !matches!(ext.as_str(), "jpg" | "jpeg" | "png" | "gif" | "webp") {
+            continue;
+        }
+        let s = p.to_string_lossy().to_string();
+        let name = entry.file_name().to_string_lossy().to_lowercase();
+        if name.starts_with("preview") {
+            return Some(s);
+        }
+        if first.is_none() {
+            first = Some(s);
+        }
+    }
+    first
+}
+
 fn scan_wallpapers() -> Vec<Wallpaper> {
     let mut out: Vec<Wallpaper> = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -1432,39 +1506,65 @@ fn scan_wallpapers() -> Vec<Wallpaper> {
                 continue;
             }
 
-            let Ok(text) = std::fs::read_to_string(dir.join("project.json")) else {
-                continue;
-            };
-            let text = text.trim_start_matches('\u{feff}');
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
-                continue;
-            };
+            let (title, kind, file, preview_name, tags) =
+                match std::fs::read_to_string(dir.join("project.json")) {
+                    Ok(text) => {
+                        let text = text.trim_start_matches('\u{feff}');
+                        match serde_json::from_str::<serde_json::Value>(text) {
+                            Ok(v) => (
+                                v.get("title")
+                                    .and_then(|x| x.as_str())
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| id.clone()),
+                                v.get("type")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_lowercase(),
+                                v.get("file")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                v.get("preview")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                v.get("tags")
+                                    .and_then(|x| x.as_array())
+                                    .map(|a| {
+                                        a.iter()
+                                            .filter_map(|t| t.as_str().map(str::to_string))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default(),
+                            ),
+                            Err(_) => (id.clone(), String::new(), String::new(), String::new(), vec![]),
+                        }
+                    }
+                    // 没有工程文件的旧壁纸：目录里翻一张图当静态背景
+                    Err(_) => {
+                        if let Some(img) = fallback_preview(&dir) {
+                            out.push(Wallpaper {
+                                id: id.clone(),
+                                title: id.clone(),
+                                kind: "static".to_string(),
+                                video: None,
+                                preview: Some(img),
+                                tags: vec![],
+                                bytes: 0,
+                            });
+                        }
+                        continue;
+                    }
+                };
 
-            let kind = v
-                .get("type")
-                .and_then(|x| x.as_str())
-                .unwrap_or("")
-                .to_lowercase();
-            let title = v
-                .get("title")
-                .and_then(|x| x.as_str())
-                .map(str::to_string)
-                .unwrap_or_else(|| id.clone());
-            let file = v.get("file").and_then(|x| x.as_str()).unwrap_or("");
-            let preview = v.get("preview").and_then(|x| x.as_str()).unwrap_or("");
-            let tags = v
-                .get("tags")
-                .and_then(|x| x.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|t| t.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default();
-
+            // 只有编码可靠的才给视频模式，其余一律静态预览
             let video = if kind == "video" && !file.is_empty() {
-                let p = dir.join(file);
-                p.is_file().then(|| p.to_string_lossy().to_string())
+                let p = dir.join(&file);
+                if p.is_file() && video_playable(&p) {
+                    Some(p.to_string_lossy().to_string())
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -1473,10 +1573,10 @@ fn scan_wallpapers() -> Vec<Wallpaper> {
                 .and_then(|p| std::fs::metadata(p).ok())
                 .map(|m| m.len() as i64)
                 .unwrap_or(0);
-            let preview_abs = if preview.is_empty() {
-                None
+            let preview_abs = if preview_name.is_empty() {
+                fallback_preview(&dir)
             } else {
-                let p = dir.join(preview);
+                let p = dir.join(&preview_name);
                 p.is_file().then(|| p.to_string_lossy().to_string())
             };
 

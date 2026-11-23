@@ -55,6 +55,7 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
     () => (list ?? []).filter((w) => w.video || w.preview),
     [list],
   );
+  const videoCount = usable.filter((w) => w.video).length;
   const shown = onlyVideo ? usable.filter((w) => w.video) : usable;
 
   /** 改了参数先本地生效，再防抖落库 */
@@ -102,7 +103,7 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
 
         <h2>背景壁纸</h2>
         <p className="pair-sub">
-          读的是 Wallpaper Engine 创意工坊目录。视频壁纸能循环播放，场景壁纸没有视频文件，只能用它的预览图当静态背景。
+          读的是 Wallpaper Engine 创意工坊目录。视频壁纸循环播放；场景、网页壁纸和识别不出编码的视频，自动用预览图当静态背景——全部可选。
         </p>
 
         <div className="wp-controls">
@@ -162,7 +163,9 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
             移除背景
           </button>
           <span className="wp-count">
-            {list === null ? "扫描中…" : `${usable.length} 个可选`}
+            {list === null
+              ? "扫描中…"
+              : `${usable.length} 个可选 · 视频 ${videoCount} · 静态 ${usable.length - videoCount}`}
             {local?.title ? ` · 当前：${local.title}` : ""}
           </span>
         </div>
