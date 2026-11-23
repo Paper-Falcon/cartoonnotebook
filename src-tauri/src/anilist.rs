@@ -21,6 +21,8 @@ query ($id: Int) {
 
 #[derive(Debug, Default, Clone)]
 pub struct AnimeMeta {
+    /// 中文名（Bangumi 的 name_cn；AniList 源为 None）
+    pub title_cn: Option<String>,
     pub title_romaji: Option<String>,
     pub title_native: Option<String>,
     pub title_english: Option<String>,
@@ -114,6 +116,7 @@ pub async fn fetch(client: &reqwest::Client, id: i64) -> Result<AnimeMeta> {
     });
 
     Ok(AnimeMeta {
+        title_cn: None,
         title_romaji: t.romaji,
         title_native: t.native,
         title_english: t.english,

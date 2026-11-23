@@ -226,6 +226,13 @@ pub fn find_by_anilist(conn: &Connection, anilist_id: i64) -> Result<Option<Work
         .optional()?)
 }
 
+pub fn find_by_bangumi(conn: &Connection, bangumi_id: i64) -> Result<Option<Work>> {
+    let sql = format!("SELECT {WORK_COLS} FROM works WHERE bangumi_id = ?1");
+    Ok(conn
+        .query_row(&sql, params![bangumi_id], Work::from_row)
+        .optional()?)
+}
+
 pub fn insert(conn: &Connection, w: &NewWork) -> Result<Work> {
     conn.execute(
         "INSERT INTO works (anilist_id, bangumi_id, title_cn, title_jp, title_en, year, format,

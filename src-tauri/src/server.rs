@@ -1,4 +1,4 @@
-use crate::{anilist, db};
+use crate::{anilist, bangumi, db};
 use axum::{
     body::Body,
     extract::{ConnectInfo, Multipart, Path, Query, State},
@@ -169,6 +169,7 @@ pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/index", get(index_json))
+        .route("/api/bgm/search", get(bgm_search))
         .route("/api/works", get(list_works).post(create_work))
         .route(
             "/api/works/:id",
@@ -442,6 +443,26 @@ pub struct AddWork {
     pub year: Option<i64>,
 }
 
+#[derive(Deserialize)]
+pub struct BgmQuery {
+    pub q: String,
+}
+
+/// Bangumi 在线搜索（国漫、日漫都能搜）
+async fn bgm_search(
+    State(st): State<Arc<AppState>>,
+    Query(q): Query<BgmQuery>,
+) -> Result<Json<Vec<bangumi::SubjectHit>>, ApiError> {
+    let kw = q.q.trim();
+    if kw.is_empty() {
+        return Ok(Json(vec![]));
+    }
+    let hits = bangumi::search(&st.http, kw)
+        .await
+        .map_err(|e| ApiError::new(StatusCode::BAD_GATEWAY, format!("Bangumi 搜索失败：{e:#}")))?;
+    Ok(Json(hits))
+}
+
 async fn create_work(
     State(st): State<Arc<AppState>>,
     Json(body): Json<AddWork>,
@@ -455,18 +476,39 @@ async fn create_work(
             return Ok(Json(w));
         }
     }
+    if let Some(bid) = body.bangumi_id {
+        let existing = {
+            let conn = st.db.lock().expect("db mutex poisoned");
+            db::find_by_bangumi(&conn, bid)?
+        };
+        if let Some(w) = existing {
+            return Ok(Json(w));
+        }
+    }
 
-    // 联网补全失败不阻断入库
+    // 联网补全失败不阻断入库：有 anilistId 走 AniList，只有 bangumiId 走 Bangumi
     let mut meta = anilist::AnimeMeta::default();
     if let Some(aid) = body.anilist_id {
         match anilist::fetch(&st.http, aid).await {
             Ok(m) => meta = m,
             Err(e) => eprintln!("[anilist] 补全失败 #{aid}: {e:#}"),
         }
+    } else if let Some(bid) = body.bangumi_id {
+        match bangumi::subject_meta(&st.http, bid).await {
+            Ok(m) => meta = m.into(),
+            Err(e) => eprintln!("[bangumi] 补全失败 #{bid}: {e:#}"),
+        }
     }
 
     let mut cover_path = None;
-    if let (Some(url), Some(aid)) = (&meta.cover_url, body.anilist_id) {
+    if let (Some(url), Some(bid)) = (&meta.cover_url, body.bangumi_id) {
+        let file = format!("bgm-{bid}.jpg");
+        let dest = st.data_dir.join("covers").join(&file);
+        match bangumi::download_cover(&st.http, url, &dest).await {
+            Ok(()) => cover_path = Some(file),
+            Err(e) => eprintln!("[cover] 下载失败 #{bid}: {e:#}"),
+        }
+    } else if let (Some(url), Some(aid)) = (&meta.cover_url, body.anilist_id) {
         let file = format!("{aid}.jpg");
         let dest = st.data_dir.join("covers").join(&file);
         match anilist::download_cover(&st.http, url, &dest).await {
@@ -481,6 +523,7 @@ async fn create_work(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+        .or_else(|| meta.title_cn.clone())
         .or_else(|| meta.title_native.clone())
         .or_else(|| json_opt(&body.title_jp))
         .or_else(|| meta.title_romaji.clone())

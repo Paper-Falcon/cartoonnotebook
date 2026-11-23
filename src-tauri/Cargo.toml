@@ -45,6 +45,7 @@ debug = 1
 
 [profile.release]
 opt-level = "s"
-lto = true
-codegen-units = 1
+# 这台机器内存紧张：fat/thin LTO 的链接峰值会 OOM，牺牲一点体积换稳定
+lto = false
+codegen-units = 16
 strip = true

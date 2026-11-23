@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Work } from "../lib/api";
+import { bgmSearch, BgmHit, Work } from "../lib/api";
 import { Candidate, formatLabel, search } from "../lib/search";
 
 interface Props {
@@ -14,7 +14,8 @@ interface Props {
 
 type Item =
   | { kind: "local"; work: Work }
-  | { kind: "remote"; c: Candidate };
+  | { kind: "remote"; c: Candidate }
+  | { kind: "bgm"; h: BgmHit };
 
 export default function SearchBox({
   indexReady,
@@ -56,12 +57,44 @@ export default function SearchBox({
       .slice(0, 6);
   }, [q, indexReady, indexSize, existing]);
 
+  // 本地索引没有命中时，自动去 Bangumi 搜（国漫的主力来源）
+  const [bgm, setBgm] = useState<BgmHit[]>([]);
+  const [bgmBusy, setBgmBusy] = useState(false);
+
+  useEffect(() => {
+    const kw = q.trim();
+    if (kw.length < 2 || remote.length > 0) {
+      setBgm([]);
+      setBgmBusy(false);
+      return;
+    }
+    let alive = true;
+    setBgmBusy(true);
+    const timer = window.setTimeout(() => {
+      bgmSearch(kw)
+        .then((hits) => {
+          if (alive) setBgm(hits);
+        })
+        .catch(() => {
+          if (alive) setBgm([]); // 网络不通就当没有，不影响本地候选
+        })
+        .finally(() => {
+          if (alive) setBgmBusy(false);
+        });
+    }, 500);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [q, remote.length]);
+
   const items = useMemo<Item[]>(
     () => [
       ...local.map((work) => ({ kind: "local" as const, work })),
       ...remote.map((c) => ({ kind: "remote" as const, c })),
+      ...bgm.map((h) => ({ kind: "bgm" as const, h })),
     ],
-    [local, remote],
+    [local, remote, bgm],
   );
 
   useEffect(() => {
@@ -86,6 +119,18 @@ export default function SearchBox({
       window.removeEventListener("keydown", onKey);
     };
   }, []);
+
+  async function pickBgm(h: BgmHit) {
+    await pick({
+      anilistId: 0,
+      bangumiId: h.id,
+      cn: h.nameCn || h.name,
+      jp: h.name,
+      year: h.year ?? 0,
+      type: "tv",
+      score: 0,
+    });
+  }
 
   async function pick(c: Candidate) {
     const key = String(c.anilistId || `${c.cn}${c.jp}`);
@@ -124,6 +169,7 @@ export default function SearchBox({
       const hit = items[active];
       if (!hit) return;
       if (hit.kind === "local") openLocal(hit.work.id);
+      else if (hit.kind === "bgm") void pickBgm(hit.h);
       else void pick(hit.c);
     }
   }
@@ -228,12 +274,52 @@ export default function SearchBox({
             </>
           )}
 
-          {local.length === 0 && remote.length === 0 && (
+          {(bgm.length > 0 || bgmBusy) && (
+            <>
+              <div className="result-group">Bangumi 在线 · 国漫也能搜</div>
+              {bgmBusy && <div className="result-empty">Bangumi 搜索中…</div>}
+              {bgm.map((h, k) => {
+                const idx = local.length + remote.length + k;
+                const c: Candidate = {
+                  anilistId: 0,
+                  bangumiId: h.id,
+                  cn: h.nameCn || h.name,
+                  jp: h.name,
+                  year: h.year ?? 0,
+                  type: "tv",
+                  score: 0,
+                };
+                return (
+                  <button
+                    key={`bgm-${h.id}`}
+                    className={`result${idx === active ? " is-active" : ""}`}
+                    onMouseEnter={() => setActive(idx)}
+                    onClick={() => void pick(c)}
+                    disabled={busy === String(h.id)}
+                  >
+                    <span className="result-main">
+                      <span className="result-cn">{h.nameCn || h.name}</span>
+                      <span className="result-sub">
+                        {[h.name !== (h.nameCn || h.name) ? h.name : "", h.year ?? "", h.eps ? `${h.eps} 集` : ""]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </span>
+                    </span>
+                    <span className="result-add">{busy === String(h.id) ? "加入中" : "加入"}</span>
+                  </button>
+                );
+              })}
+            </>
+          )}
+
+          {local.length === 0 && remote.length === 0 && bgm.length === 0 && (
             <div className="result-empty">
               {!indexReady
                 ? "索引载入中…"
-                : `没找到「${q.trim()}」`}
-              <span>可以试试日文原名，或只输入名字里的两三个字</span>
+                : bgmBusy
+                  ? "Bangumi 搜索中…"
+                  : `没找到「${q.trim()}」`}
+              <span>国漫会自动去 Bangumi 搜；日漫可以试试日文原名</span>
             </div>
           )}
 

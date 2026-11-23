@@ -61,6 +61,19 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const listWorks = () => request<Work[]>("/api/works");
 
+export interface BgmHit {
+  id: number;
+  name: string;
+  nameCn: string;
+  year: number | null;
+  eps: number | null;
+  cover: string | null;
+}
+
+/** Bangumi 在线搜索：国漫、日漫都能搜（网络不通时接口会报错，前端自行降级） */
+export const bgmSearch = (q: string) =>
+  request<BgmHit[]>(`/api/bgm/search?q=${encodeURIComponent(q)}`);
+
 export const addWork = (payload: AddWorkPayload) =>
   request<Work>("/api/works", { method: "POST", body: JSON.stringify(payload) });
 
