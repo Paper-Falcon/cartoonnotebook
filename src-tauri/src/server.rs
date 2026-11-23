@@ -1303,6 +1303,9 @@ pub struct WallpaperConfig {
     pub blur: f64,
     /// cover / contain
     pub fit: String,
+    /// 这台机器上确认播不出来、已降级为静态的壁纸 id
+    #[serde(default)]
+    pub unplayable: Vec<String>,
 }
 
 impl Default for WallpaperConfig {
@@ -1313,6 +1316,7 @@ impl Default for WallpaperConfig {
             veil: 0.8,
             blur: 3.0,
             fit: "cover".to_string(),
+            unplayable: Vec::new(),
         }
     }
 }
@@ -1870,6 +1874,8 @@ pub struct WallpaperPatch {
     pub veil: Option<f64>,
     pub blur: Option<f64>,
     pub fit: Option<String>,
+    /// 整表替换：这台机器上确认播不出来的 id 列表
+    pub unplayable: Option<Vec<String>>,
 }
 
 async fn set_wallpaper(
@@ -1893,6 +1899,16 @@ async fn set_wallpaper(
     }
     if let Some(v) = patch.fit {
         cfg.fit = if v == "contain" { "contain".into() } else { "cover".into() };
+    }
+    if let Some(list) = patch.unplayable {
+        let mut uniq: Vec<String> = Vec::new();
+        for x in list {
+            let x = x.trim().to_string();
+            if !x.is_empty() && !uniq.contains(&x) {
+                uniq.push(x);
+            }
+        }
+        cfg.unplayable = uniq;
     }
 
     save_config(&st, &cfg)?;

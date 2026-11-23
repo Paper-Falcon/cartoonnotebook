@@ -258,6 +258,8 @@ export interface WallpaperState {
   hasPreview: boolean;
   hasVideo: boolean;
   hasWeb: boolean;
+  /** 本机确认播不出来、已降级静态的 id */
+  unplayable: string[];
 }
 
 export const listWallpapers = (refresh = false) =>
@@ -272,6 +274,7 @@ export const setWallpaperSetting = (patch: {
   veil?: number;
   blur?: number;
   fit?: string;
+  unplayable?: string[];
 }) =>
   request<WallpaperState>("/api/wallpaper", {
     method: "PATCH",

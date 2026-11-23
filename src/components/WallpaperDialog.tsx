@@ -205,6 +205,9 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
                 </span>
                 {!w.video && !w.entry && <span className="wp-static">静态</span>}
                 {w.entry && !w.video && <span className="wp-static is-web">网页</span>}
+                {local?.unplayable?.includes(w.id) && (
+                  <span className="wp-static is-dim">已降级</span>
+                )}
                 {local?.id === w.id && <span className="wp-badge">使用中</span>}
               </button>
             ))}

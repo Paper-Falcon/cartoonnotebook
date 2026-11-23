@@ -2339,3 +2339,8 @@ html.has-wallpaper body {
   background: rgba(63, 94, 145, 0.92);
   color: #fff;
 }
+
+.wp-static.is-dim {
+  background: rgba(90, 84, 74, 0.92);
+  color: #f3efe8;
+}

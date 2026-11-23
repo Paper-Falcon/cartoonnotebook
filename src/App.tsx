@@ -6,7 +6,7 @@ import PairDialog from "./components/PairDialog";
 import ExportDialog from "./components/ExportDialog";
 import TagsDialog from "./components/TagsDialog";
 import WallpaperDialog from "./components/WallpaperDialog";
-import { Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTag, getWallpaperSetting, listTags, listWorks, patchWork, removeWork, wallpaperEntryUrl, wallpaperPreviewUrl, wallpaperVideoUrl } from "./lib/api";
+import { Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTag, getWallpaperSetting, setWallpaperSetting, listTags, listWorks, patchWork, removeWork, wallpaperEntryUrl, wallpaperPreviewUrl, wallpaperVideoUrl } from "./lib/api";
 import { Candidate, loadIndex } from "./lib/search";
 import { genreLabel, parseGenres } from "./lib/genres";
 
@@ -75,6 +75,8 @@ export default function App() {
   const wallActive = Boolean(
     wall?.id && wall.enabled && (wall.hasVideo || wall.hasWeb || wall.hasPreview),
   );
+  // 视频模式还要这台机器真的放得动：确认放不出的走静态
+  const videoOk = Boolean(wall?.hasVideo && !wall.unplayable?.includes(wall.id ?? ""));
 
   useEffect(() => {
     getWallpaperSetting()
@@ -100,6 +102,27 @@ export default function App() {
     document.addEventListener("visibilitychange", onVisibility);
     return () => document.removeEventListener("visibilitychange", onVisibility);
   }, [wallActive, wall?.id]);
+
+  // 视频 10 秒还没出画面（readyState 太低）也判为播不了，避免一直停在封面上
+  useEffect(() => {
+    if (!wallActive || !wall?.hasVideo || wall.unplayable?.includes(wall.id ?? "")) {
+      return;
+    }
+    const wid = wall.id;
+    if (!wid) return;
+    const timer = window.setTimeout(() => {
+      const v = document.querySelector<HTMLVideoElement>(".wallpaper-layer video");
+      if (v && v.readyState < 2) {
+        void setWallpaperSetting({
+          unplayable: [...(wall.unplayable ?? []), wid],
+        })
+          .then(setWall)
+          .catch(() => undefined);
+        showToast("这个壁纸迟迟出不了画面，已记住并改用静态预览");
+      }
+    }, 10000);
+    return () => window.clearTimeout(timer);
+  }, [wallActive, wall?.id, wall?.hasVideo]);
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
@@ -328,7 +351,7 @@ export default function App() {
     <>
       {wallActive && wall && wall.id && (
         <div className="wallpaper-layer" aria-hidden="true">
-          {wall.hasVideo ? (
+          {videoOk ? (
             <video
               key={wall.id}
               src={wallpaperVideoUrl(wall.id)}
@@ -343,7 +366,17 @@ export default function App() {
                 // 模糊会把边缘透明化，稍微放大一点盖住
                 transform: wall.blur > 0 ? "scale(1.04)" : undefined,
               }}
-              onError={() => showToast("这个壁纸播不了，已用静态预览兜底")}
+              onError={() => {
+                const wid = wall.id;
+                if (wid && !wall.unplayable?.includes(wid)) {
+                  void setWallpaperSetting({
+                    unplayable: [...(wall.unplayable ?? []), wid],
+                  })
+                    .then(setWall)
+                    .catch(() => undefined);
+                }
+                showToast("这个壁纸播不了，已记住并改用静态预览");
+              }}
             />
           ) : wall.hasWeb ? (
             <iframe
