@@ -194,6 +194,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/wallpapers", get(list_wallpapers))
         .route("/api/wallpapers/:id/preview", get(wallpaper_preview))
         .route("/api/wallpapers/:id/video", get(wallpaper_video))
+        .route("/api/wallpapers/:id/entry", get(wallpaper_entry))
+        .route("/api/wallpapers/:id/entry/", get(wallpaper_entry))
+        .route(
+            "/api/wallpapers/:id/entry/*rest",
+            get(wallpaper_entry_asset),
+        )
         .route("/api/wallpaper", get(get_wallpaper).patch(set_wallpaper))
         .route("/api/pair", get(pair_info))
         .route("/pair", get(pair_landing))
@@ -1272,11 +1278,16 @@ pub struct Wallpaper {
     pub title: String,
     /// video / scene / web
     pub kind: String,
-    /// 只有 video 类型才有，绝对路径
+    /// 编码可靠的视频才有值
     pub video: Option<String>,
+    /// 网页壁纸的入口文件（相对路径，如 index.html）
+    pub entry: Option<String>,
     pub preview: Option<String>,
     pub tags: Vec<String>,
     pub bytes: i64,
+    /// 本地目录，仅供服务端解析文件用，不对外暴露
+    #[serde(skip)]
+    pub dir: Option<std::path::PathBuf>,
 }
 
 /// 背景的显示参数，和"选了哪个壁纸"一起存进 settings
@@ -1317,6 +1328,8 @@ pub struct WallpaperState {
     pub has_preview: bool,
     /// 是不是能动的视频
     pub has_video: bool,
+    /// 是不是网页壁纸（iframe 动态渲染）
+    pub has_web: bool,
 }
 
 const WALLPAPER_KEY: &str = "wallpaper_config";
@@ -1548,9 +1561,11 @@ fn scan_wallpapers() -> Vec<Wallpaper> {
                                 title: id.clone(),
                                 kind: "static".to_string(),
                                 video: None,
+                                entry: None,
                                 preview: Some(img),
                                 tags: vec![],
                                 bytes: 0,
+                                dir: Some(dir),
                             });
                         }
                         continue;
@@ -1565,6 +1580,13 @@ fn scan_wallpapers() -> Vec<Wallpaper> {
                 } else {
                     None
                 }
+            } else {
+                None
+            };
+            // 网页壁纸的入口文件
+            let entry = if kind == "web" && !file.is_empty() {
+                let p = dir.join(&file);
+                p.is_file().then(|| file.clone())
             } else {
                 None
             };
@@ -1585,9 +1607,11 @@ fn scan_wallpapers() -> Vec<Wallpaper> {
                 title,
                 kind,
                 video,
+                entry,
                 preview: preview_abs,
                 tags,
                 bytes,
+                dir: Some(dir),
             });
         }
     }
@@ -1612,6 +1636,7 @@ fn current_wallpaper(st: &AppState) -> WallpaperState {
         kind: found.as_ref().map(|w| w.kind.clone()),
         has_preview: found.as_ref().map(|w| w.preview.is_some()).unwrap_or(false),
         has_video: found.as_ref().map(|w| w.video.is_some()).unwrap_or(false),
+        has_web: found.as_ref().map(|w| w.entry.is_some()).unwrap_or(false),
         config,
     }
 }
@@ -1691,6 +1716,137 @@ async fn wallpaper_video(
     Ok(res.into_response())
 }
 
+fn mime_for_ext(ext: &str) -> &'static str {
+    match ext {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript",
+        "css" => "text/css",
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "mp3" => "audio/mpeg",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "ogg" | "oga" => "audio/ogg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" | "otf" => "font/ttf",
+        "wasm" => "application/wasm",
+        "ico" => "image/x-icon",
+        _ => "application/octet-stream",
+    }
+}
+
+/// 把 shim 注进 <head> 里面；找不到就放最前面
+fn inject_after_head(html: &str, snippet: &str) -> String {
+    let lower = html.to_lowercase();
+    if let Some(idx) = lower.find("<head") {
+        if let Some(end) = html[idx..].find('>') {
+            let at = idx + end + 1;
+            let mut out = String::with_capacity(html.len() + snippet.len());
+            out.push_str(&html[..at]);
+            out.push_str(snippet);
+            out.push_str(&html[at..]);
+            return out;
+        }
+    }
+    format!("{snippet}{html}")
+}
+
+/// 网页壁纸入口：返回注入了 WE 私有接口 shim 的 index.html
+async fn wallpaper_entry(
+    State(st): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let w = find_wallpaper(&st, &id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "壁纸不存在"))?;
+    let (Some(dir), Some(entry)) = (w.dir.as_ref(), w.entry.as_ref()) else {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "这个壁纸不是网页类型",
+        ));
+    };
+    let bytes = tokio::fs::read(dir.join(entry))
+        .await
+        .map_err(|_| ApiError::new(StatusCode::NOT_FOUND, "入口文件读不到"))?;
+    let text = String::from_utf8_lossy(&bytes).to_string();
+
+    // WE 的运行时会调用页面注册的 wallpaperPropertyListener.applyUserProperties；
+    // 这里替它把 project.json 里的默认属性喂进去，不然一部分网页壁纸只画个黑底
+    let props = std::fs::read_to_string(dir.join("project.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(t.trim_start_matches('\u{feff}')).ok())
+        .and_then(|v| {
+            v.get("general")
+                .and_then(|g| g.get("properties"))
+                .cloned()
+        })
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let shim = format!(
+        r#"<script data-cn-shim>(function(){{var d={props};var applied=false;function apply(l){{if(!applied&&l&&typeof l.applyUserProperties==="function"){{try{{l.applyUserProperties(d);applied=true;}}catch(e){{}}}}}}var cur=null;try{{Object.defineProperty(window,"wallpaperPropertyListener",{{configurable:true,get:function(){{return cur;}},set:function(v2){{cur=v2;apply(v2);}}}});}}catch(e){{}}window.wallpaperRegisterAudioListener=function(){{}};window.wallpaperRegisterAudioPropertyListener=function(){{}};}})();</script>"#
+    );
+    let out = inject_after_head(&text, &shim);
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        out,
+    )
+        .into_response())
+}
+
+/// 网页壁纸的相对路径素材（index.js、assets/xxx、甚至 ../images/xxx）
+/// 安全性靠 canonicalize 后的前缀校验，而不是简单拒绝 ".."
+async fn wallpaper_entry_asset(
+    State(st): State<Arc<AppState>>,
+    Path((id, rel)): Path<(String, String)>,
+    req: Request<Body>,
+) -> Result<Response, ApiError> {
+    let w = find_wallpaper(&st, &id)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "壁纸不存在"))?;
+    let Some(dir) = w.dir.as_ref() else {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "壁纸目录不存在"));
+    };
+    let rel = rel.trim_start_matches('/');
+    if rel.is_empty() || rel.contains('\\') || rel.contains(':') {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "非法路径"));
+    }
+    let base = dir
+        .canonicalize()
+        .map_err(|_| ApiError::new(StatusCode::NOT_FOUND, "壁纸目录不存在"))?;
+    let file = dir.join(rel);
+    let canon = file
+        .canonicalize()
+        .map_err(|_| ApiError::new(StatusCode::NOT_FOUND, "素材不存在"))?;
+    if !canon.starts_with(&base) || !canon.is_file() {
+        return Err(ApiError::new(StatusCode::NOT_FOUND, "素材不存在"));
+    }
+    let ext = canon
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let res = ServeFile::new(canon)
+        .oneshot(req)
+        .await
+        .expect("ServeFile 不会失败")
+        .into_response();
+    // ServeFile 按 Web 标准猜 mime，网页壁纸里的素材类型杂，按扩展名修正
+    let mut res = res;
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        mime_for_ext(&ext).parse().expect("mime 合法"),
+    );
+    Ok(res)
+}
+
 async fn get_wallpaper(State(st): State<Arc<AppState>>) -> Json<WallpaperState> {
     let state = tokio::task::spawn_blocking(move || current_wallpaper(&st))
         .await
@@ -1700,6 +1856,7 @@ async fn get_wallpaper(State(st): State<Arc<AppState>>) -> Json<WallpaperState> 
             kind: None,
             has_preview: false,
             has_video: false,
+            has_web: false,
         });
     Json(state)
 }

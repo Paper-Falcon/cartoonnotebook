@@ -236,6 +236,8 @@ export interface Wallpaper {
   title: string;
   kind: "video" | "scene" | "web" | string;
   video: string | null;
+  /** 网页壁纸的入口文件（由 /entry 接口注入 WE shim 后渲染） */
+  entry: string | null;
   preview: string | null;
   tags: string[];
   bytes: number;
@@ -255,6 +257,7 @@ export interface WallpaperState {
   kind: string | null;
   hasPreview: boolean;
   hasVideo: boolean;
+  hasWeb: boolean;
 }
 
 export const listWallpapers = (refresh = false) =>
@@ -279,6 +282,9 @@ export const wallpaperPreviewUrl = (id: string) =>
   `${API_BASE}/api/wallpapers/${id}/preview`;
 export const wallpaperVideoUrl = (id: string) =>
   `${API_BASE}/api/wallpapers/${id}/video`;
+
+export const wallpaperEntryUrl = (id: string) =>
+  `${API_BASE}/api/wallpapers/${id}/entry`;
 
 export const STATUS_LABEL: Record<string, string> = {
   plan: "想看",

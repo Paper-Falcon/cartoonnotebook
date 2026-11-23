@@ -52,10 +52,11 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
   }, [onClose]);
 
   const usable = useMemo(
-    () => (list ?? []).filter((w) => w.video || w.preview),
+    () => (list ?? []).filter((w) => w.video || w.preview || w.entry),
     [list],
   );
   const videoCount = usable.filter((w) => w.video).length;
+  const webCount = usable.filter((w) => w.entry && !w.video).length;
   const shown = onlyVideo ? usable.filter((w) => w.video) : usable;
 
   /** 改了参数先本地生效，再防抖落库 */
@@ -165,7 +166,7 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
           <span className="wp-count">
             {list === null
               ? "扫描中…"
-              : `${usable.length} 个可选 · 视频 ${videoCount} · 静态 ${usable.length - videoCount}`}
+              : `${usable.length} 个可选 · 视频 ${videoCount} · 网页 ${webCount} · 静态 ${usable.length - videoCount - webCount}`}
             {local?.title ? ` · 当前：${local.title}` : ""}
           </span>
         </div>
@@ -195,10 +196,15 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
                 <img src={wallpaperPreviewUrl(w.id)} alt={w.title} loading="lazy" />
                 <span className="wp-title">{w.title}</span>
                 <span className="wp-meta">
-                  {w.video ? formatBytes(w.bytes) : "静态"}
+                  {w.video
+                    ? formatBytes(w.bytes)
+                    : w.entry
+                      ? "网页动态"
+                      : "静态"}
                   {w.tags[0] ? ` · ${w.tags[0]}` : ""}
                 </span>
-                {!w.video && <span className="wp-static">静态</span>}
+                {!w.video && !w.entry && <span className="wp-static">静态</span>}
+                {w.entry && !w.video && <span className="wp-static is-web">网页</span>}
                 {local?.id === w.id && <span className="wp-badge">使用中</span>}
               </button>
             ))}

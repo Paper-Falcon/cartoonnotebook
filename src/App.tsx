@@ -6,7 +6,7 @@ import PairDialog from "./components/PairDialog";
 import ExportDialog from "./components/ExportDialog";
 import TagsDialog from "./components/TagsDialog";
 import WallpaperDialog from "./components/WallpaperDialog";
-import { Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTag, getWallpaperSetting, listTags, listWorks, patchWork, removeWork, wallpaperPreviewUrl, wallpaperVideoUrl } from "./lib/api";
+import { Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTag, getWallpaperSetting, listTags, listWorks, patchWork, removeWork, wallpaperEntryUrl, wallpaperPreviewUrl, wallpaperVideoUrl } from "./lib/api";
 import { Candidate, loadIndex } from "./lib/search";
 import { genreLabel, parseGenres } from "./lib/genres";
 
@@ -72,7 +72,9 @@ export default function App() {
   }
 
   // 背景壁纸：设置存在后端，启动时取一次
-  const wallActive = Boolean(wall?.id && wall.enabled && (wall.hasVideo || wall.hasPreview));
+  const wallActive = Boolean(
+    wall?.id && wall.enabled && (wall.hasVideo || wall.hasWeb || wall.hasPreview),
+  );
 
   useEffect(() => {
     getWallpaperSetting()
@@ -342,6 +344,15 @@ export default function App() {
                 transform: wall.blur > 0 ? "scale(1.04)" : undefined,
               }}
               onError={() => showToast("这个壁纸播不了，已用静态预览兜底")}
+            />
+          ) : wall.hasWeb ? (
+            <iframe
+              key={wall.id}
+              src={wallpaperEntryUrl(wall.id)}
+              title={wall.title ?? "壁纸"}
+              sandbox="allow-scripts"
+              className="wallpaper-web"
+              scrolling="no"
             />
           ) : (
             <img
