@@ -30,7 +30,8 @@ const stripSeason = (s) => {
   let out = norm(s);
   for (let i = 0; i < 3; i++) {
     out = out
-      .replace(/(第[0-9一二三四五六七八九十]+[季部篇章]|上半季|下半季|中章|终章|完结篇|特别篇|精编版|season\d+|part\d+|[0-9ivx]+)$/, "")
+      .replace(/(第[0-9一二三四五六七八九十]+[季部篇章]|上半季|下半季|中章|终章|完结篇|特别篇|精编版|剧场版|劇場版|总集篇|OVA|season\d+|part\d+|[0-9ivx]+)$/, "")
+      .replace(/^(剧场版|劇場版|总集篇|OVA|特别篇)/, "")
       .trim();
   }
   return out;

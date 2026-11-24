@@ -35,11 +35,16 @@ fn strip_season(s: &str) -> String {
 
 fn strip_one_suffix(s: &str) -> String {
     let t = s.trim();
-    const WORDS: [&str; 8] = [
+    // 这些标记词出现在开头或结尾都视为可剥离（「剧场版 X」vs「X 劇場版」语序不定）
+    const WORDS: [&str; 12] = [
         "上半季", "下半季", "中章", "终章", "完结篇", "特别篇", "精编版", "OAD",
+        "剧场版", "劇場版", "总集篇", "OVA",
     ];
     for w in WORDS {
         if let Some(stripped) = t.strip_suffix(w) {
+            return stripped.trim().to_string();
+        }
+        if let Some(stripped) = t.strip_prefix(w) {
             return stripped.trim().to_string();
         }
     }
