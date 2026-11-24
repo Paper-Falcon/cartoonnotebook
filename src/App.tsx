@@ -23,7 +23,7 @@ const TABS = [
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
-type SortKey = "added" | "rating" | "year" | "title" | "custom";
+type SortKey = "added" | "rating" | "year" | "title";
 
 export default function App() {
   const [works, setWorks] = useState<Work[]>([]);
@@ -260,14 +260,11 @@ export default function App() {
       case "title":
         arr.sort((a, b) => a.titleCn.localeCompare(b.titleCn, "zh-Hans-CN"));
         break;
-      case "custom":
-        arr.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0) || b.id - a.id);
-        break;
       default:
         arr.sort((a, b) => b.id - a.id);
     }
     return arr;
-  }, [works, filter, sort, year, genre, rating, tagFilter]); // custom 排序依赖 sortOrder
+  }, [works, filter, sort, year, genre, rating, tagFilter]);
 
   // 筛选下拉里的可选项，只列库里真实存在的
   const yearOptions = useMemo(() => {
@@ -312,68 +309,6 @@ export default function App() {
     }
   }
 
-  // ---------- 拖拽排序（把手 + 手动鼠标跟踪，不依赖 HTML5 拖放事件） ----------
-  const [drag, setDrag] = useState<{ id: number | null; overId: number | null }>({
-    id: null,
-    overId: null,
-  });
-
-  function startGripDrag(e: React.MouseEvent, id: number) {
-    if (picking || visible.length < 2) return;
-    e.preventDefault();
-    setDrag({ id, overId: id });
-
-    const move = (ev: MouseEvent) => {
-      const el = document.elementFromPoint(ev.clientX, ev.clientY);
-      const card = el?.closest("[data-work-id]");
-      const overId = card ? Number(card.getAttribute("data-work-id")) : null;
-      setDrag((s) =>
-        overId && overId !== s.overId ? { ...s, overId } : s,
-      );
-    };
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-      setDrag((s) => {
-        if (s.id && s.overId && s.id !== s.overId) {
-          void handleDropReorder(s.id, s.overId);
-        }
-        return { id: null, overId: null };
-      });
-    };
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
-  }
-
-  async function handleDropReorder(dragged: number, targetId: number) {
-    if (dragged === targetId) return;
-    const di = visible.findIndex((w) => w.id === dragged);
-    const ti = visible.findIndex((w) => w.id === targetId);
-    if (di < 0 || ti < 0) return;
-
-    const arr = [...visible];
-    const [moved] = arr.splice(di, 1);
-    arr.splice(ti, 0, moved);
-
-    // 按显示顺序重排 sort_order（靠前的值大，与 added 的 id 倒序习惯一致）
-    const updates = arr.map((w, i) => ({ id: w.id, order: arr.length - i }));
-    const changed = updates.filter((u) => {
-      const cur = visible.find((w) => w.id === u.id);
-      return cur && (cur.sortOrder || 0) !== u.order;
-    });
-    setSort("custom");
-    if (!changed.length) return;
-    try {
-      const patched = await Promise.all(
-        changed.map((u) => patchWork(u.id, { sortOrder: u.order })),
-      );
-      const byId = new Map(patched.map((w) => [w.id, w]));
-      setWorks((prev) => prev.map((w) => byId.get(w.id) ?? w));
-      showToast("顺序已保存");
-    } catch (e) {
-      showToast(`排序保存失败：${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
 
   async function handlePatch(id: number, patch: Partial<Work>) {
     const snapshot = works;
@@ -644,7 +579,6 @@ export default function App() {
                   aria-label="排序方式"
                 >
                   <option value="added">最近加入</option>
-                  <option value="custom">手动排序</option>
                   <option value="rating">评分最高</option>
                   <option value="year">年份最新</option>
                   <option value="title">按标题</option>
@@ -734,10 +668,6 @@ export default function App() {
                     work={w}
                     selectable={picking}
                     selected={picked.has(w.id)}
-                    dragEnabled={!picking}
-                    dragging={drag.id === w.id}
-                    dropTarget={drag.overId === w.id && drag.id !== w.id}
-                    onGripDown={(e) => startGripDrag(e, w.id)}
                     onClick={() => {
                       if (picking) togglePick(w.id);
                       else setSelectedId(w.id);
