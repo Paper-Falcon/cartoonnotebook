@@ -2,6 +2,8 @@ export interface Work {
   id: number;
   anilistId: number | null;
   bangumiId: number | null;
+  /** 手动排序值（拖拽写入），0 = 未排过 */
+  sortOrder: number;
   titleCn: string;
   titleJp: string | null;
   titleEn: string | null;
@@ -60,6 +62,20 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const listWorks = () => request<Work[]>("/api/works");
+
+export interface Appearance {
+  font: string;
+  fontCustom: string;
+  color: string;
+}
+
+export const getAppearance = () => request<Partial<Appearance>>("/api/appearance");
+
+export const setAppearance = (a: Appearance) =>
+  request<Partial<Appearance>>("/api/appearance", {
+    method: "PUT",
+    body: JSON.stringify(a),
+  });
 
 export interface BgmHit {
   id: number;

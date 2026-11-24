@@ -213,6 +213,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/wallpapers/:id/file/*rest", get(wallpaper_entry_asset))
         .route("/api/wallpaper", get(get_wallpaper).patch(set_wallpaper))
+        .route("/api/appearance", get(get_appearance).put(set_appearance))
         .route("/api/pair", get(pair_info))
         .route("/pair", get(pair_landing))
         .fallback(spa)
@@ -2220,4 +2221,59 @@ fn offline_bgm_meta(bid: i64) -> Option<bangumi::SubjectMeta> {
         summary,
         cover_url: cover,
     })
+}
+
+// ---------- 外观设置（字体 / 文字颜色） ----------
+
+fn sane_font(name: &str) -> String {
+    // 字体名会拼进 CSS font-family 的引号里，剥掉引号/反斜杠/分号防注入
+    name.chars()
+        .filter(|c| !matches!(c, '"' | '\'' | '\\' | ';' | '{' | '}'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn sane_color(v: &str) -> String {
+    let v = v.trim();
+    let ok = (v.len() == 4 || v.len() == 7)
+        && v.starts_with('#')
+        && v[1..].chars().all(|c| c.is_ascii_hexdigit());
+    if ok { v.to_lowercase() } else { String::new() }
+}
+
+async fn get_appearance(State(st): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let v = {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::get_setting(&conn, "appearance").ok().flatten()
+    };
+    let parsed = v.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    Json(parsed.unwrap_or_else(|| serde_json::json!({})))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppearanceBody {
+    #[serde(default)]
+    pub font: String,
+    #[serde(default)]
+    pub font_custom: String,
+    #[serde(default)]
+    pub color: String,
+}
+
+async fn set_appearance(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<AppearanceBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let obj = serde_json::json!({
+        "font": sane_font(&body.font),
+        "fontCustom": sane_font(&body.font_custom),
+        "color": sane_color(&body.color),
+    });
+    {
+        let conn = st.db.lock().expect("db mutex poisoned");
+        db::set_setting(&conn, "appearance", &obj.to_string())?;
+    }
+    Ok(Json(obj))
 }

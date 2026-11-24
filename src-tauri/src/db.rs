@@ -74,7 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_media_work    ON media(work_id);
 
 const WORK_COLS: &str = "id, anilist_id, bangumi_id, title_cn, title_jp, title_en, aliases, year, \
      format, episodes_total, cover_path, synopsis, genres, status, rating, progress, favorite, \
-     finished_at, note, media_mode, created_at";
+     finished_at, note, media_mode, created_at, sort_order";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -100,6 +100,9 @@ pub struct Work {
     pub note: Option<String>,
     pub media_mode: String,
     pub created_at: String,
+    /// 手动排序值（拖拽写入），0 = 未排过
+    #[serde(default)]
+    pub sort_order: f64,
     #[serde(default)]
     pub tags: Vec<String>,
 }
@@ -128,6 +131,7 @@ impl Work {
             note: row.get("note")?,
             media_mode: row.get("media_mode")?,
             created_at: row.get("created_at")?,
+            sort_order: row.get("sort_order").unwrap_or(0.0),
             tags: Vec::new(),
         })
     }
@@ -161,6 +165,8 @@ pub struct WorkPatch {
     pub note: Option<String>,
     pub media_mode: Option<String>,
     pub synopsis: Option<String>,
+    /// 手动排序值（拖拽排序用）
+    pub sort_order: Option<f64>,
 }
 
 pub fn open(dir: &Path) -> Result<Connection> {
@@ -170,6 +176,8 @@ pub fn open(dir: &Path) -> Result<Connection> {
     // 早期版本的 media 表没有 thumb 列，老库在这里补齐（报错说明已存在，忽略）
     let _ = conn.execute("ALTER TABLE media ADD COLUMN thumb TEXT", []);
     let _ = conn.execute("ALTER TABLE media ADD COLUMN position REAL NOT NULL DEFAULT 0", []);
+    // 手动排序：拖拽卡片时写入，0 = 未手动排过
+    let _ = conn.execute("ALTER TABLE works ADD COLUMN sort_order REAL NOT NULL DEFAULT 0", []);
     Ok(conn)
 }
 
@@ -297,6 +305,9 @@ pub fn update(conn: &Connection, id: i64, p: &WorkPatch) -> Result<Option<Work>>
             Some(v.clone())
         };
     }
+    if let Some(v) = p.sort_order {
+        cur.sort_order = v;
+    }
 
     // 标成"看完"却没有日期时，用当天兜底（不只依赖前端）
     if cur.status == "done" && cur.finished_at.is_none() {
@@ -307,7 +318,8 @@ pub fn update(conn: &Connection, id: i64, p: &WorkPatch) -> Result<Option<Work>>
 
     conn.execute(
         "UPDATE works SET title_cn = ?2, status = ?3, rating = ?4, progress = ?5, favorite = ?6,
-                          finished_at = ?7, note = ?8, media_mode = ?9, synopsis = ?10
+                          finished_at = ?7, note = ?8, media_mode = ?9, synopsis = ?10,
+                          sort_order = ?11
          WHERE id = ?1",
         params![
             id,
@@ -319,7 +331,8 @@ pub fn update(conn: &Connection, id: i64, p: &WorkPatch) -> Result<Option<Work>>
             cur.finished_at,
             cur.note,
             cur.media_mode,
-            cur.synopsis
+            cur.synopsis,
+            cur.sort_order
         ],
     )?;
     get(conn, id)

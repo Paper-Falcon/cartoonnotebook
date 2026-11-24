@@ -30,6 +30,8 @@ export default function SearchBox({
   const [open, setOpen] = useState(initialQuery.length > 0);
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
+  // 连续添加：加过的候选标"已加入"，面板保持打开
+  const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -142,14 +144,18 @@ export default function SearchBox({
     });
   }
 
+  function keyOf(c: Candidate) {
+    return c.anilistId ? `a-${c.anilistId}` : `b-${c.bangumiId || c.cn}`;
+  }
+
   async function pick(c: Candidate) {
-    const key = String(c.anilistId || `${c.cn}${c.jp}`);
-    if (busy) return;
+    const key = keyOf(c);
+    if (busy || addedKeys.has(key)) return;
     setBusy(key);
     try {
       await onAdd(c);
-      setQ("");
-      setOpen(false);
+      // 加完不清空不关闭：想连加几部就点几部
+      setAddedKeys((prev) => new Set(prev).add(key));
     } finally {
       setBusy(null);
     }
@@ -277,7 +283,13 @@ export default function SearchBox({
                           .join(" · ")}
                       </span>
                     </span>
-                    <span className="result-add">{busy === key ? "加入中" : "加入"}</span>
+                    <span className="result-add">
+                      {addedKeys.has(key)
+                        ? "已加入"
+                        : busy === key
+                          ? "加入中"
+                          : "加入"}
+                    </span>
                   </button>
                 );
               })}
@@ -313,7 +325,7 @@ export default function SearchBox({
                     className={`result${idx === active ? " is-active" : ""}`}
                     onMouseEnter={() => setActive(idx)}
                     onClick={() => void pick(c)}
-                    disabled={busy === String(h.id)}
+                    disabled={busy === String(h.id) || addedKeys.has(`b-${h.id}`)}
                   >
                     <span className="result-main">
                       <span className="result-cn">{h.nameCn || h.name}</span>
@@ -323,7 +335,13 @@ export default function SearchBox({
                           .join(" · ")}
                       </span>
                     </span>
-                    <span className="result-add">{busy === String(h.id) ? "加入中" : "加入"}</span>
+                    <span className="result-add">
+                      {addedKeys.has(`b-${h.id}`)
+                        ? "已加入"
+                        : busy === String(h.id)
+                          ? "加入中"
+                          : "加入"}
+                    </span>
                   </button>
                 );
               })}
@@ -346,7 +364,8 @@ export default function SearchBox({
             )}
 
           <div className="result-foot">
-            索引 {indexSize.toLocaleString()} 部 · 库里 {works.length} 部
+            索引 {indexSize.toLocaleString()} 部 · 库里 {works.length} 部 ·
+            加完不关闭，可连续添加；Esc 关闭
           </div>
         </div>
       )}

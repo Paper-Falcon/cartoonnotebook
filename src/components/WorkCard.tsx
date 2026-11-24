@@ -7,9 +7,22 @@ interface Props {
   onClick?: () => void;
   selectable?: boolean;
   selected?: boolean;
+  draggable?: boolean;
+  onDragStart?: () => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDrop?: () => void;
 }
 
-export default function WorkCard({ work, onClick, selectable, selected }: Props) {
+export default function WorkCard({
+  work,
+  onClick,
+  selectable,
+  selected,
+  draggable,
+  onDragStart,
+  onDragOver,
+  onDrop,
+}: Props) {
   const [broken, setBroken] = useState(false);
   const src = coverUrl(work.coverPath);
   const isMovie = work.format?.toLowerCase() === "movie";
@@ -34,6 +47,10 @@ export default function WorkCard({ work, onClick, selectable, selected }: Props)
       type="button"
       onClick={onClick}
       title={work.titleCn}
+      draggable={draggable ? true : undefined}
+      onDragStart={draggable ? onDragStart : undefined}
+      onDragOver={draggable ? onDragOver : undefined}
+      onDrop={draggable ? onDrop : undefined}
     >
       <div className="cover">
         {src && !broken ? (

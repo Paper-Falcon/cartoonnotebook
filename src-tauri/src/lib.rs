@@ -12,9 +12,11 @@ pub fn run() {
     let port = server::resolve_port();
     println!("[app] data dir = {}", data_dir.display());
 
+    eprintln!("[boot] AppState::new 开始");
     let state = Arc::new(
         server::AppState::new(data_dir, port).expect("初始化数据目录 / 数据库失败"),
     );
+
 
     tauri::Builder::default()
         // 单实例：第二次启动只聚焦已有窗口，避免抢 8787 端口变空壳。

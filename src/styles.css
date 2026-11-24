@@ -2373,3 +2373,161 @@ html.has-wallpaper body {
   background: rgba(63, 145, 94, 0.92);
   color: #fff;
 }
+
+/* ---------- 外观设置 ---------- */
+
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(31, 29, 26, 0.45);
+  backdrop-filter: blur(6px);
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.settings-panel {
+  width: min(480px, 92vw);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 48px rgba(31, 29, 26, 0.25);
+  overflow: hidden;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px 10px;
+}
+
+.settings-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.settings-close {
+  background: none;
+  border: 0;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  color: var(--ink-2);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.settings-close:hover {
+  background: var(--accent-soft);
+}
+
+.settings-body {
+  padding: 6px 18px 0;
+  display: grid;
+  gap: 12px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.settings-row > span {
+  width: 92px;
+  flex-shrink: 0;
+}
+
+.settings-row select,
+.settings-row input[type="text"] {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+}
+
+.settings-row input[type="color"] {
+  width: 42px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.settings-reset {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink-2);
+  border-radius: 8px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.settings-reset:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.settings-preview {
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--bg);
+}
+
+.settings-preview-inner b {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 15px;
+}
+
+.settings-preview-inner p {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.settings-preview-inner .dim {
+  font-size: 12px;
+  opacity: 0.62;
+}
+
+.settings-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 18px 16px;
+}
+
+.settings-cancel,
+.settings-save {
+  border-radius: 8px;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.settings-cancel {
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink-2);
+}
+
+.settings-save {
+  border: 0;
+  background: var(--accent);
+  color: #fff;
+}
+
+.settings-save:hover {
+  filter: brightness(1.06);
+}

@@ -6,9 +6,10 @@ import PairDialog from "./components/PairDialog";
 import ExportDialog from "./components/ExportDialog";
 import TagsDialog from "./components/TagsDialog";
 import WallpaperDialog from "./components/WallpaperDialog";
-import { Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTag, getWallpaperSetting, setWallpaperSetting, listTags, listWorks, patchWork, removeWork, wallpaperEntryUrl, wallpaperPreviewUrl, wallpaperVideoUrl } from "./lib/api";
+import { Appearance, Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTag, getAppearance, getWallpaperSetting, setAppearance as saveAppearanceApi, setWallpaperSetting, listTags, listWorks, patchWork, removeWork, wallpaperEntryUrl, wallpaperPreviewUrl, wallpaperVideoUrl } from "./lib/api";
 import { Candidate, loadIndex } from "./lib/search";
 import { loadWebWallGL, SceneHandle } from "./lib/scenewall";
+import SettingsDialog from "./components/SettingsDialog";
 import { API_BASE } from "./lib/api";
 import { genreLabel, parseGenres } from "./lib/genres";
 
@@ -22,7 +23,7 @@ const TABS = [
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
-type SortKey = "added" | "rating" | "year" | "title";
+type SortKey = "added" | "rating" | "year" | "title" | "custom";
 
 export default function App() {
   const [works, setWorks] = useState<Work[]>([]);
@@ -73,6 +74,14 @@ export default function App() {
       .catch(() => setTags([]));
   }
 
+  // 外观（字体/文字颜色）：后端持久化，启动时取一次
+  const [appearance, setAppearance] = useState<Appearance>({
+    font: "",
+    fontCustom: "",
+    color: "",
+  });
+  const [showSettings, setShowSettings] = useState(false);
+
   // 背景壁纸：设置存在后端，启动时取一次
   const wallActive = Boolean(
     wall?.id && wall.enabled && (wall.hasVideo || wall.hasWeb || wall.hasPreview),
@@ -81,6 +90,15 @@ export default function App() {
   const videoOk = Boolean(wall?.hasVideo && !wall.unplayable?.includes(wall.id ?? ""));
 
   useEffect(() => {
+    getAppearance()
+      .then((a) =>
+        setAppearance({
+          font: a.font ?? "",
+          fontCustom: a.fontCustom ?? "",
+          color: a.color ?? "",
+        }),
+      )
+      .catch(() => undefined);
     getWallpaperSetting()
       .then(setWall)
       .catch(() => undefined);
@@ -90,7 +108,44 @@ export default function App() {
     const root = document.documentElement;
     root.classList.toggle("has-wallpaper", wallActive);
     return () => root.classList.remove("has-wallpaper");
-  }, [wallActive]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wall?.id, wall?.enabled]);
+
+  // 外观：字体与文字颜色写进根 CSS 变量
+  useEffect(() => {
+    const root = document.documentElement;
+    const effFont = appearance.fontCustom.trim() || appearance.font.trim();
+    if (effFont) {
+      root.style.setProperty("--font-sans", `"${effFont}", sans-serif`);
+    } else {
+      root.style.removeProperty("--font-sans");
+    }
+    if (appearance.color) {
+      root.style.setProperty("--ink", appearance.color);
+      root.style.setProperty(
+        "--ink-2",
+        `color-mix(in srgb, ${appearance.color} 62%, var(--bg))`,
+      );
+      root.style.setProperty(
+        "--ink-3",
+        `color-mix(in srgb, ${appearance.color} 45%, var(--bg))`,
+      );
+    } else {
+      root.style.removeProperty("--ink");
+      root.style.removeProperty("--ink-2");
+      root.style.removeProperty("--ink-3");
+    }
+  }, [appearance]);
+
+  async function handleSaveAppearance(a: Appearance) {
+    const saved = await saveAppearanceApi(a);
+    setAppearance({
+      font: saved.font ?? a.font,
+      fontCustom: saved.fontCustom ?? a.fontCustom,
+      color: saved.color ?? a.color,
+    });
+    showToast("外观已保存");
+  }
 
   // 窗口切到后台就暂停，别在看不见的时候空转解码
   useEffect(() => {
@@ -205,11 +260,14 @@ export default function App() {
       case "title":
         arr.sort((a, b) => a.titleCn.localeCompare(b.titleCn, "zh-Hans-CN"));
         break;
+      case "custom":
+        arr.sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0) || b.id - a.id);
+        break;
       default:
         arr.sort((a, b) => b.id - a.id);
     }
     return arr;
-  }, [works, filter, sort, year, genre, rating, tagFilter]);
+  }, [works, filter, sort, year, genre, rating, tagFilter]); // custom 排序依赖 sortOrder
 
   // 筛选下拉里的可选项，只列库里真实存在的
   const yearOptions = useMemo(() => {
@@ -251,6 +309,41 @@ export default function App() {
       );
     } catch (e) {
       showToast(`加入失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  // ---------- 拖拽排序 ----------
+  const dragIdRef = useRef<number | null>(null);
+
+  async function handleDropReorder(targetId: number) {
+    const dragged = dragIdRef.current;
+    dragIdRef.current = null;
+    if (!dragged || dragged === targetId) return;
+    const di = visible.findIndex((w) => w.id === dragged);
+    const ti = visible.findIndex((w) => w.id === targetId);
+    if (di < 0 || ti < 0) return;
+
+    const arr = [...visible];
+    const [moved] = arr.splice(di, 1);
+    arr.splice(ti, 0, moved);
+
+    // 按显示顺序重排 sort_order（靠前的值大，与 added 的 id 倒序习惯一致）
+    const updates = arr.map((w, i) => ({ id: w.id, order: arr.length - i }));
+    const changed = updates.filter((u) => {
+      const cur = visible.find((w) => w.id === u.id);
+      return cur && (cur.sortOrder || 0) !== u.order;
+    });
+    setSort("custom");
+    if (!changed.length) return;
+    try {
+      const patched = await Promise.all(
+        changed.map((u) => patchWork(u.id, { sortOrder: u.order })),
+      );
+      const byId = new Map(patched.map((w) => [w.id, w]));
+      setWorks((prev) => prev.map((w) => byId.get(w.id) ?? w));
+      showToast("顺序已保存");
+    } catch (e) {
+      showToast(`排序保存失败：${e instanceof Error ? e.message : String(e)}`);
     }
   }
 
@@ -429,6 +522,9 @@ export default function App() {
             背景
             {wallActive && <i className="pair-dot" />}
           </button>
+          <button className="pair-btn" onClick={() => setShowSettings(true)}>
+            外观
+          </button>
           <button className="pair-btn" onClick={() => setShowExport(true)}>
             备份
           </button>
@@ -520,6 +616,7 @@ export default function App() {
                   aria-label="排序方式"
                 >
                   <option value="added">最近加入</option>
+                  <option value="custom">手动排序</option>
                   <option value="rating">评分最高</option>
                   <option value="year">年份最新</option>
                   <option value="title">按标题</option>
@@ -609,6 +706,12 @@ export default function App() {
                     work={w}
                     selectable={picking}
                     selected={picked.has(w.id)}
+                    draggable={!picking}
+                    onDragStart={() => {
+                      dragIdRef.current = w.id;
+                    }}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => void handleDropReorder(w.id)}
                     onClick={() => {
                       if (picking) togglePick(w.id);
                       else setSelectedId(w.id);
@@ -723,6 +826,20 @@ export default function App() {
           onClose={() => setShowWallpaper(false)}
           onChanged={setWall}
           onToast={showToast}
+        />
+      )}
+      {showSettings && (
+        <SettingsDialog
+          initial={appearance}
+          onClose={() => setShowSettings(false)}
+          onSave={handleSaveAppearance}
+        />
+      )}
+      {showSettings && (
+        <SettingsDialog
+          initial={appearance}
+          onClose={() => setShowSettings(false)}
+          onSave={handleSaveAppearance}
         />
       )}
       </div>
