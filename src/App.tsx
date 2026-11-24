@@ -81,8 +81,6 @@ export default function App() {
     color: "",
   });
   const [showSettings, setShowSettings] = useState(false);
-  // 顶栏快捷调节：磨砂/透光度
-  const [showGlass, setShowGlass] = useState(false);
 
   // 背景壁纸：设置存在后端，启动时取一次
   const wallActive = Boolean(
@@ -500,12 +498,6 @@ export default function App() {
             背景
             {wallActive && <i className="pair-dot" />}
           </button>
-          <button
-            className={`pair-btn${showGlass ? " is-active" : ""}`}
-            onClick={() => setShowGlass((v) => !v)}
-          >
-            磨砂
-          </button>
           <button className="pair-btn" onClick={() => setShowSettings(true)}>
             外观
           </button>
@@ -804,45 +796,6 @@ export default function App() {
           onChanged={setWall}
           onToast={showToast}
         />
-      )}
-      {showGlass && wall && (
-        <div className="glass-pop" onClick={(e) => e.stopPropagation()}>
-          <label className="glass-row">
-            <span>磨砂 {Math.round(wall.blur)}px</span>
-            <input
-              type="range"
-              min={0}
-              max={24}
-              step={1}
-              value={Math.round(wall.blur)}
-              onChange={(e) => {
-                const v = Number(e.target.value);
-                setWallpaperSetting({ blur: v })
-                  .then(setWall)
-                  .catch(() => undefined);
-              }}
-            />
-          </label>
-          <label className="glass-row">
-            <span>透光 {Math.round((wall.veil ?? 0.8) * 100)}%</span>
-            <input
-              type="range"
-              min={10}
-              max={100}
-              step={1}
-              value={Math.round((wall.veil ?? 0.8) * 100)}
-              onChange={(e) => {
-                const v = Number(e.target.value) / 100;
-                setWallpaperSetting({ veil: v })
-                  .then(setWall)
-                  .catch(() => undefined);
-              }}
-            />
-          </label>
-          <button className="glass-done" onClick={() => setShowGlass(false)}>
-            完成
-          </button>
-        </div>
       )}
       {showSettings && (
         <SettingsDialog
