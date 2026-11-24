@@ -49,8 +49,13 @@ function titleMatch(query, attrs) {
     if (c === q || c.includes(q) || q.includes(c)) best = Math.max(best, 3);
     else if (q2 && c2 && (c2 === q2 || c2.includes(q2) || q2.includes(c2)))
       best = Math.max(best, 2.5);
-    else if (q2 && c2 && (q2.startsWith(c2) || c2.startsWith(q2)) && Math.min(q2.length, c2.length) >= 3)
-      best = Math.max(best, 1.2);
+    else if (q2 && c2) {
+      let plen = 0;
+      while (plen < q2.length && plen < c2.length && q2[plen] === c2[plen]) plen++;
+      if (plen >= 12) best = Math.max(best, 3);
+      else if (plen >= 8) best = Math.max(best, 2.6);
+      else if (plen >= 3) best = Math.max(best, 1.2);
+    }
   }
   return best;
 }
@@ -67,7 +72,7 @@ async function searchKitsu(q) {
   const d = await r.json();
   return (d.data || []).map((a) => ({
     attrs: a.attributes || {},
-    poster: (a.attributes?.posterImage || {})?.large || "",
+    poster: (a.attributes?.posterImage || {})?.large || (a.attributes?.posterImage || {})?.medium || (a.attributes?.posterImage || {})?.original || "",
   }));
 }
 

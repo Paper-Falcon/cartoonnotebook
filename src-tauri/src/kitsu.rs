@@ -12,8 +12,9 @@ fn norm(s: &str) -> String {
         .filter(|c| !matches!(
             c,
             ' ' | ':' | '：' | '·' | '-' | '—' | '_' | '（' | '）' | '(' | ')'
-            | '"' | '\'' | '「' | '」' | '『' | '』' | ',' | '，' | '.' | '。'
-            | '!' | '！' | '?' | '？' | '|' | '\u{3000}'
+            |             '"' | '\'' | '\u{2019}' | '\u{2018}' | '[' | ']' | '「' | '」' | '『'
+            | '』' | ',' | '，' | '.' | '。' | '!' | '！' | '?' | '？' | '|'
+            | '\u{3000}'
         ))
         .collect()
 }
@@ -112,11 +113,20 @@ fn title_score(query: &str, attrs: &Value) -> f64 {
             && (c2 == q2 || c2.contains(&q2) || q2.contains(&c2))
         {
             best = best.max(2.5);
-        } else if !q2.is_empty() && !c2.is_empty()
-            && (q2.starts_with(&c2) || c2.starts_with(&q2))
-            && q2.len().min(c2.len()) >= 3
-        {
-            best = best.max(1.2);
+        } else if !q2.is_empty() && !c2.is_empty() {
+            // 公共前缀越长越可信：「fatestaynight…」13 字符前缀足以确认同一部
+            let plen = q2
+                .chars()
+                .zip(c2.chars())
+                .take_while(|(a, b)| a == b)
+                .count();
+            if plen >= 12 {
+                best = best.max(3.0);
+            } else if plen >= 8 {
+                best = best.max(2.6);
+            } else if plen >= 3 {
+                best = best.max(1.2);
+            }
         }
     }
     best
@@ -139,6 +149,11 @@ async fn search(client: &reqwest::Client, query: &str) -> anyhow::Result<Vec<Val
         anyhow::bail!("Kitsu 返回 {}", resp.status());
     }
     let v: Value = resp.json().await.context("解析 Kitsu 响应失败")?;
+    eprintln!(
+        "[kitsu-dbg] 搜索「{}」返回 {} 条",
+        query,
+        v.get("data").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0)
+    );
     Ok(v.get("data")
         .and_then(Value::as_array)
         .cloned()
@@ -159,12 +174,28 @@ pub async fn find_cover(
         };
         let poster = attrs
             .get("posterImage")
-            .and_then(|p| p.get("large").and_then(Value::as_str).or_else(|| p.get("medium").and_then(Value::as_str)))
+            .and_then(|p| {
+                // large/medium 是静态 CDN 地址；original 是带签名的临时地址
+                // （部分条目只有它），排在后面兜底
+                ["large", "medium", "original", "small", "tiny"]
+                    .iter()
+                    .find_map(|k| {
+                        p.get(*k).and_then(Value::as_str).filter(|s| !s.is_empty())
+                    })
+            })
             .unwrap_or("");
         if poster.is_empty() {
             continue;
         }
         let score = title_score(query, attrs);
+        eprintln!(
+            "[kitsu-dbg] 候选「{}」得分 {:.2}",
+            attrs
+                .get("canonicalTitle")
+                .and_then(Value::as_str)
+                .unwrap_or("?"),
+            score
+        );
         if score > best_score {
             best_score = score;
             best_poster = poster.to_string();
