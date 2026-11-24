@@ -1,6 +1,6 @@
 :root {
   --bg: #fbfaf7;
-  --surface: #ffffff;
+  --surface: rgba(255, 255, 255, 0.72);
   --line: #e8e2d7;
   --line-strong: #d8d0c1;
   --ink: #1f1d1a;
@@ -835,7 +835,7 @@ button.card:focus-visible {
   max-width: 92vw;
   display: flex;
   flex-direction: column;
-  background: #fffdfa;
+  background: rgba(255, 253, 250, 0.78);
   border-left: 1px solid var(--line);
   box-shadow: -30px 0 70px -40px rgba(31, 29, 26, 0.55);
   z-index: 60;
@@ -1484,7 +1484,7 @@ video.lightbox-media {
   width: 380px;
   max-width: 100%;
   padding: 26px 26px 22px;
-  background: #fffdfa;
+  background: rgba(255, 253, 250, 0.78);
   border-radius: 14px;
   box-shadow: 0 30px 60px -30px rgba(0, 0, 0, 0.5);
   text-align: center;
@@ -2582,4 +2582,16 @@ html.has-wallpaper .topbar {
   backdrop-filter: none;
   border-color: #e81123;
   color: #fff;
+}
+
+/* ---------- 全局毛玻璃面板 ---------- */
+
+.search-field,
+.results,
+.settings-panel,
+.drawer,
+.pair-card,
+.wp-card {
+  backdrop-filter: blur(18px) saturate(1.05);
+  -webkit-backdrop-filter: blur(18px) saturate(1.05);
 }
