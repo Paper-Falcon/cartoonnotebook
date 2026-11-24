@@ -7,10 +7,14 @@ interface Props {
   onClick?: () => void;
   selectable?: boolean;
   selected?: boolean;
-  draggable?: boolean;
-  onDragStart?: () => void;
-  onDragOver?: (e: React.DragEvent) => void;
-  onDrop?: () => void;
+  /** 显示拖拽把手（⠿），按住它拖动可排序 */
+  dragEnabled?: boolean;
+  /** 当前卡是否正被拖起 */
+  dragging?: boolean;
+  /** 当前卡是否是放置目标 */
+  dropTarget?: boolean;
+  /** 把手的 mousedown：从这里开始手动拖拽 */
+  onGripDown?: (e: React.MouseEvent) => void;
 }
 
 export default function WorkCard({
@@ -18,10 +22,10 @@ export default function WorkCard({
   onClick,
   selectable,
   selected,
-  draggable,
-  onDragStart,
-  onDragOver,
-  onDrop,
+  dragEnabled,
+  dragging,
+  dropTarget,
+  onGripDown,
 }: Props) {
   const [broken, setBroken] = useState(false);
   const src = coverUrl(work.coverPath);
@@ -43,15 +47,26 @@ export default function WorkCard({
 
   return (
     <button
-      className={`card${selectable ? " is-selectable" : ""}${selected ? " is-picked" : ""}`}
+      className={`card${selectable ? " is-selectable" : ""}${selected ? " is-picked" : ""}${
+        dragging ? " is-dragging" : ""
+      }${dropTarget ? " is-drop-target" : ""}`}
       type="button"
       onClick={onClick}
       title={work.titleCn}
-      draggable={draggable ? true : undefined}
-      onDragStart={draggable ? onDragStart : undefined}
-      onDragOver={draggable ? onDragOver : undefined}
-      onDrop={draggable ? onDrop : undefined}
     >
+      {dragEnabled && (
+        <span
+          className="card-grip"
+          title="按住拖动调整顺序"
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onGripDown?.(e);
+          }}
+        >
+          ⠿
+        </span>
+      )}
       <div className="cover">
         {src && !broken ? (
           <img

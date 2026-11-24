@@ -312,13 +312,41 @@ export default function App() {
     }
   }
 
-  // ---------- 拖拽排序 ----------
-  const dragIdRef = useRef<number | null>(null);
+  // ---------- 拖拽排序（把手 + 手动鼠标跟踪，不依赖 HTML5 拖放事件） ----------
+  const [drag, setDrag] = useState<{ id: number | null; overId: number | null }>({
+    id: null,
+    overId: null,
+  });
 
-  async function handleDropReorder(targetId: number) {
-    const dragged = dragIdRef.current;
-    dragIdRef.current = null;
-    if (!dragged || dragged === targetId) return;
+  function startGripDrag(e: React.MouseEvent, id: number) {
+    if (picking || visible.length < 2) return;
+    e.preventDefault();
+    setDrag({ id, overId: id });
+
+    const move = (ev: MouseEvent) => {
+      const el = document.elementFromPoint(ev.clientX, ev.clientY);
+      const card = el?.closest("[data-work-id]");
+      const overId = card ? Number(card.getAttribute("data-work-id")) : null;
+      setDrag((s) =>
+        overId && overId !== s.overId ? { ...s, overId } : s,
+      );
+    };
+    const up = () => {
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      setDrag((s) => {
+        if (s.id && s.overId && s.id !== s.overId) {
+          void handleDropReorder(s.id, s.overId);
+        }
+        return { id: null, overId: null };
+      });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  }
+
+  async function handleDropReorder(dragged: number, targetId: number) {
+    if (dragged === targetId) return;
     const di = visible.findIndex((w) => w.id === dragged);
     const ti = visible.findIndex((w) => w.id === targetId);
     if (di < 0 || ti < 0) return;
@@ -706,12 +734,10 @@ export default function App() {
                     work={w}
                     selectable={picking}
                     selected={picked.has(w.id)}
-                    draggable={!picking}
-                    onDragStart={() => {
-                      dragIdRef.current = w.id;
-                    }}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={() => void handleDropReorder(w.id)}
+                    dragEnabled={!picking}
+                    dragging={drag.id === w.id}
+                    dropTarget={drag.overId === w.id && drag.id !== w.id}
+                    onGripDown={(e) => startGripDrag(e, w.id)}
                     onClick={() => {
                       if (picking) togglePick(w.id);
                       else setSelectedId(w.id);
