@@ -519,11 +519,16 @@ async fn create_work(
 
     let mut cover_path = None;
     if let (Some(url), Some(bid)) = (&meta.cover_url, body.bangumi_id) {
-        let file = format!("bgm-{bid}.jpg");
-        let dest = st.data_dir.join("covers").join(&file);
-        match bangumi::download_cover(&st.http, url, &dest).await {
-            Ok(()) => cover_path = Some(file),
-            Err(e) => eprintln!("[cover] 下载失败 #{bid}: {e:#}"),
+        // lain.bgm.tv 被墙，别白等 20 秒超时；离线详情里已换成 Kitsu 地址的才下载
+        if url.contains("bgm.tv") {
+            eprintln!("[cover] #{bid} 封面地址是被墙的 bgm 图床，跳过");
+        } else {
+            let file = format!("bgm-{bid}.jpg");
+            let dest = st.data_dir.join("covers").join(&file);
+            match bangumi::download_cover(&st.http, url, &dest).await {
+                Ok(()) => cover_path = Some(file),
+                Err(e) => eprintln!("[cover] 下载失败 #{bid}: {e:#}"),
+            }
         }
     } else if let (Some(url), Some(aid)) = (&meta.cover_url, body.anilist_id) {
         let file = format!("{aid}.jpg");
@@ -2276,4 +2281,50 @@ async fn set_appearance(
         db::set_setting(&conn, "appearance", &obj.to_string())?;
     }
     Ok(Json(obj))
+}
+
+/// 启动后补齐已有国漫作品的封面：库里 bangumi_id 有值但没封面的，
+/// 从离线详情里取 Kitsu 图源地址下载（一次最多 60 部，间隔 400ms）
+pub async fn heal_bgm_covers(state: Arc<AppState>) {
+    let pending: Vec<(i64, i64)> = {
+        let conn = state.db.lock().expect("db mutex poisoned");
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT id, bangumi_id FROM works WHERE bangumi_id > 0 AND (cover_path IS NULL OR cover_path = '')",
+        ) {
+            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))) {
+                out = rows.filter_map(Result::ok).collect();
+            }
+        }
+        out
+    };
+    if pending.is_empty() {
+        return;
+    }
+    let mut healed = 0;
+    for (id, bid) in pending.into_iter().take(60) {
+        let Some(d) = bgm_details().get(&bid) else {
+            continue;
+        };
+        if d.cover.is_empty() || d.cover.contains("bgm.tv") {
+            continue;
+        }
+        let file = format!("bgm-{bid}.jpg");
+        let dest = state.data_dir.join("covers").join(&file);
+        match bangumi::download_cover(&state.http, &d.cover, &dest).await {
+            Ok(()) => {
+                let conn = state.db.lock().expect("db mutex poisoned");
+                let _ = conn.execute(
+                    "UPDATE works SET cover_path = ?2 WHERE id = ?1",
+                    rusqlite::params![id, file],
+                );
+                healed += 1;
+            }
+            Err(e) => eprintln!("[cover-heal] #{bid} 封面下载失败: {e:#}"),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    }
+    if healed > 0 {
+        println!("[cover-heal] 已补齐 {healed} 张国漫封面");
+    }
 }

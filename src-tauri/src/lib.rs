@@ -12,7 +12,6 @@ pub fn run() {
     let port = server::resolve_port();
     println!("[app] data dir = {}", data_dir.display());
 
-    eprintln!("[boot] AppState::new 开始");
     let state = Arc::new(
         server::AppState::new(data_dir, port).expect("初始化数据目录 / 数据库失败"),
     );
@@ -37,6 +36,15 @@ pub fn run() {
                     eprintln!("[server] 启动失败: {e:#}");
                 }
             });
+
+            // 启动片刻后补齐已有国漫作品的封面（Kitsu 图源）
+            {
+                let st2 = state.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                    server::heal_bgm_covers(st2).await;
+                });
+            }
 
             // 恢复上次窗口的大小和位置
             if let Some(win) = app.get_webview_window("main") {
