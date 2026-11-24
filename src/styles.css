@@ -2549,17 +2549,21 @@ html.has-wallpaper .topbar {
 }
 
 .win-controls button {
-  width: 34px;
-  height: 30px;
+  width: 46px;
+  height: 38px;
   border: 0;
   background: transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   cursor: pointer;
   color: var(--ink-2);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1;
   display: grid;
   place-items: center;
+}
+
+.win-controls button:active {
+  background: rgba(31, 29, 26, 0.14);
 }
 
 .win-controls button:hover {

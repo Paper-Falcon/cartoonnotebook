@@ -475,7 +475,16 @@ export default function App() {
       )}
 
       <div className="app">
-      <header className="topbar" data-tauri-drag-region>
+      <header
+        className="topbar"
+        data-tauri-drag-region
+        onDoubleClick={(e) => {
+          const t = e.target as HTMLElement;
+          if (t.closest("button, input, .searchbox, .win-controls")) return;
+          if (!t.closest("[data-tauri-drag-region]")) return;
+          void appWindow.toggleMaximize();
+        }}
+      >
         <div className="brand" data-tauri-drag-region>
           <img className="mark" src="/icon.png" alt="" />
           <span className="brand-name">动漫档案馆</span>
@@ -513,7 +522,7 @@ export default function App() {
           <span className="stat-label">部收藏</span>
           {doneCount > 0 && <span className="stat-sub">其中看完 {doneCount}</span>}
 
-          <div className="win-controls" data-tauri-drag-region="false">
+          <div className="win-controls">
             <button
               title="最小化"
               onClick={() => void appWindow.minimize()}
