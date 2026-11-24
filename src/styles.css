@@ -1975,6 +1975,13 @@ html.has-wallpaper body {
   background: transparent;
 }
 
+/* 壁纸开着时顶栏融入背景：不再铺白色底板，壁纸直接透上来 */
+html.has-wallpaper .topbar {
+  background: transparent;
+  backdrop-filter: none;
+  border-bottom-color: transparent;
+}
+
 .wallpaper-layer {
   position: fixed;
   inset: 0;
