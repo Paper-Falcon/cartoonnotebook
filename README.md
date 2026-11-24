@@ -6,8 +6,8 @@
 
 ## 下载
 
-Windows x64 安装包：[releases/CartoonNotebook_0.1.0_x64-setup.exe](releases/CartoonNotebook_0.1.0_x64-setup.exe)
-（约 6.4 MB，双击安装，不依赖任何运行库；数据同样存在本机）
+Windows x64 安装包：到 [Releases](https://github.com/Paper-Falcon/cartoonnotebook/releases/latest) 下载最新的 `CartoonNotebook_x.y.z_x64-setup.exe`
+（约 6 MB，双击安装，不依赖任何运行库；数据同样存在本机）
 
 ## 功能
 
@@ -58,6 +58,30 @@ npm run index        # 重建标题索引
 ```
 
 打包注意：必须用 `npm run app:build`，直接 `cargo build --release` 出来的是开发模式二进制。
+
+## 发版
+
+版本号分散在 **三个地方**，必须同时改：
+
+| 文件 | 作用 |
+| --- | --- |
+| `package.json` | npm 侧版本 |
+| `src-tauri/tauri.conf.json` | 决定安装包文件名（`CartoonNotebook_x.y.z_x64-setup.exe`） |
+| `src-tauri/Cargo.toml` | 决定 exe 内部的程序版本号 |
+
+只改其中一处，就会出现「文件名写着新版本、装完还是老版本」的错包——之前 v0.2～v0.4 就是这么发出去的。
+
+改完推 tag，GitHub Actions 会自动打包并挂到 Release 上：
+
+```bash
+# 1. 三处版本号统一改成 0.6.0
+# 2. 提交并打 tag
+git commit -am "chore: bump to 0.6.0"
+git tag v0.6.0
+git push origin main --tags
+```
+
+workflow 会先校验 tag 与三处版本号是否完全一致，不一致直接失败，不会再产出错包。
 
 ## 目录
 

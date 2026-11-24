@@ -1,0 +1,84 @@
+name: Release
+
+# 推一个 v* tag 就自动打包 NSIS 安装包，并挂到对应的 Release 上。
+# 目的：杜绝「tag 打了、版本号没改、安装包还是老的」这类问题。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要重新打包的 tag，例如 v0.5.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: 构建 Windows 安装包
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # 关键一步：tag 名必须和三个地方的版本号完全一致，否则直接失败。
+      # 版本号分散在 package.json / tauri.conf.json / Cargo.toml 三处，
+      # 只改一处就会出现「文件名是 0.4.0、程序还是 0.1.0」的情况。
+      - name: 校验版本号一致性
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAW="${{ inputs.tag || github.ref_name }}"
+          TAG="${RAW#v}"
+          PKG=$(node -p "require('./package.json').version")
+          CONF=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          CARGO=$(sed -n 's/^version = "\(.*\)"/\1/p' src-tauri/Cargo.toml | head -1)
+          echo "tag=${TAG}  package.json=${PKG}  tauri.conf.json=${CONF}  Cargo.toml=${CARGO}"
+          if [ "${TAG}" != "${PKG}" ] || [ "${TAG}" != "${CONF}" ] || [ "${TAG}" != "${CARGO}" ]; then
+            echo "::error title=版本号不一致::tag 是 ${TAG}，但 package.json=${PKG} / tauri.conf.json=${CONF} / Cargo.toml=${CARGO}。请先把这几处统一，再重新打 tag。"
+            exit 1
+          fi
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 缓存 Rust 编译产物
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: 安装前端依赖
+        run: npm ci
+
+      - name: 打包并发布
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "CartoonNotebook ${{ inputs.tag || github.ref_name }}"
+          releaseBody: |
+            本次构建由 GitHub Actions 自动产出。
+
+            下载 `CartoonNotebook_${{ inputs.tag || github.ref_name }}_x64-setup.exe` 安装即可。
+          releaseDraft: false
+          prerelease: false
+
+      # 把哈希打出来，谁怀疑「包是不是新的」直接比对即可。
+      - name: 输出安装包 SHA-256
+        shell: bash
+        run: |
+          find src-tauri/target/release/bundle/nsis -name "*.exe" -print0 \
+            | xargs -0 -r sha256sum | tee -a "$GITHUB_STEP_SUMMARY"
