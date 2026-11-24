@@ -2539,3 +2539,34 @@ html.has-wallpaper .topbar {
   filter: brightness(1.06);
 }
 
+
+/* ---------- 无边框窗口：自绘窗口按钮 ---------- */
+
+.win-controls {
+  display: flex;
+  gap: 2px;
+  margin-left: 6px;
+}
+
+.win-controls button {
+  width: 34px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+
+.win-controls button:hover {
+  background: rgba(31, 29, 26, 0.08);
+}
+
+.win-controls .win-close:hover {
+  background: #e81123;
+  color: #fff;
+}

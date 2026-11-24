@@ -10,6 +10,7 @@ import { Appearance, Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTa
 import { Candidate, loadIndex } from "./lib/search";
 import { loadWebWallGL, SceneHandle } from "./lib/scenewall";
 import SettingsDialog from "./components/SettingsDialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { API_BASE } from "./lib/api";
 import { genreLabel, parseGenres } from "./lib/genres";
 
@@ -81,6 +82,7 @@ export default function App() {
     color: "",
   });
   const [showSettings, setShowSettings] = useState(false);
+  const appWindow = getCurrentWindow();
 
   // 背景壁纸：设置存在后端，启动时取一次
   const wallActive = Boolean(
@@ -473,8 +475,8 @@ export default function App() {
       )}
 
       <div className="app">
-      <header className="topbar">
-        <div className="brand">
+      <header className="topbar" data-tauri-drag-region>
+        <div className="brand" data-tauri-drag-region>
           <img className="mark" src="/icon.png" alt="" />
           <span className="brand-name">动漫档案馆</span>
         </div>
@@ -510,6 +512,28 @@ export default function App() {
           <span className="stat-num">{works.length}</span>
           <span className="stat-label">部收藏</span>
           {doneCount > 0 && <span className="stat-sub">其中看完 {doneCount}</span>}
+
+          <div className="win-controls" data-tauri-drag-region="false">
+            <button
+              title="最小化"
+              onClick={() => void appWindow.minimize()}
+            >
+              &#x2500;
+            </button>
+            <button
+              title="最大化 / 还原"
+              onClick={() => void appWindow.toggleMaximize()}
+            >
+              &#x25A1;
+            </button>
+            <button
+              className="win-close"
+              title="关闭"
+              onClick={() => void appWindow.close()}
+            >
+              &#x2715;
+            </button>
+          </div>
         </div>
       </header>
 
