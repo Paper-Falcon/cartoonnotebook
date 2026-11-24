@@ -517,60 +517,6 @@ async fn create_work(
         }
     }
 
-    let mut cover_path = None;
-    // Kitsu 兜底：详情里没有可达封面地址时，按标题搜一次（结果缓存）
-    if meta
-        .cover_url
-        .as_deref()
-        .map(|u| u.is_empty() || u.contains("bgm.tv"))
-        .unwrap_or(true)
-    {
-        let query = meta
-            .title_native
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-            .or_else(|| meta.title_cn.as_deref().filter(|s| !s.trim().is_empty()))
-            .map(str::to_string);
-        if let Some(q) = query {
-            if let Some(url) = kitsu_cover_for(&st, &q).await {
-                meta.cover_url = Some(url);
-            }
-        }
-    }
-    if let (Some(url), Some(bid)) = (&meta.cover_url, body.bangumi_id) {
-        // lain.bgm.tv 被墙，别白等 20 秒超时；离线详情里已换成 Kitsu 地址的才下载
-        if url.contains("bgm.tv") {
-            eprintln!("[cover] #{bid} 封面地址是被墙的 bgm 图床，跳过");
-        } else {
-            let file = format!("bgm-{bid}.jpg");
-            let dest = st.data_dir.join("covers").join(&file);
-            match bangumi::download_cover(&st.http, url, &dest).await {
-                Ok(()) => cover_path = Some(file),
-                Err(e) => eprintln!("[cover] 下载失败 #{bid}: {e:#}"),
-            }
-        }
-    } else if (meta.cover_url.is_some()) && body.bangumi_id.is_none() && body.anilist_id.is_none() {
-        // 既没有 bgm 也没有 anilist 编号（如手动补录），但有标题能搜到封面：
-        // 存成 bgm-标题哈希文件，避免和已有封面撞名
-        let Some(url) = &meta.cover_url else { unreachable!() };
-        if !url.contains("bgm.tv") {
-            let key = format!("{:x}", md5_of(url));
-            let file = format!("k-{key}.jpg");
-            let dest = st.data_dir.join("covers").join(&file);
-            match bangumi::download_cover(&st.http, url, &dest).await {
-                Ok(()) => cover_path = Some(file),
-                Err(e) => eprintln!("[cover] 下载失败: {e:#}"),
-            }
-        }
-    } else if let (Some(url), Some(aid)) = (&meta.cover_url, body.anilist_id) {
-        let file = format!("{aid}.jpg");
-        let dest = st.data_dir.join("covers").join(&file);
-        match anilist::download_cover(&st.http, url, &dest).await {
-            Ok(()) => cover_path = Some(file),
-            Err(e) => eprintln!("[cover] 下载失败 #{aid}: {e:#}"),
-        }
-    }
-
     let title_cn = body
         .title_cn
         .as_deref()
@@ -587,12 +533,12 @@ async fn create_work(
         anilist_id: body.anilist_id,
         bangumi_id: body.bangumi_id,
         title_cn,
-        title_jp: body.title_jp.or(meta.title_native),
+        title_jp: body.title_jp.or_else(|| meta.title_native.clone()),
         title_en: meta.title_english.clone(),
         year: body.year.or(meta.year),
         format: meta.format.clone(),
         episodes_total: meta.episodes,
-        cover_path,
+        cover_path: None,
         synopsis: meta.description.clone(),
         genres: if meta.genres.is_empty() {
             None
@@ -605,7 +551,96 @@ async fn create_work(
         let conn = st.db.lock().expect("db mutex poisoned");
         db::insert(&conn, &new)?
     };
+
+    // 封面在后台补：添加立即完成，不等下载（下不来启动时 heal 还会兜底）
+    {
+        let st2 = st.clone();
+        let work_id = work.id;
+        let bid = body.bangumi_id;
+        let aid = body.anilist_id;
+        let t_native = meta.title_native.clone();
+        let t_cn = meta.title_cn.clone();
+        tauri::async_runtime::spawn(async move {
+            fetch_and_set_cover(st2, work_id, bid, aid, t_native, t_cn).await;
+        });
+    }
+
     Ok(Json(work))
+}
+
+/// 后台取封面：离线详情 / Kitsu 搜索 / AniList，谁先给出可达地址用谁，
+/// 下载成功后写回 cover_path（前端几秒后刷新列表即可见）
+async fn fetch_and_set_cover(
+    st: Arc<AppState>,
+    work_id: i64,
+    bid: Option<i64>,
+    aid: Option<i64>,
+    title_native: Option<String>,
+    title_cn: Option<String>,
+) {
+    let mut url: Option<String> = None;
+    // 1) 离线详情里的 Kitsu 地址（国漫）
+    if let Some(b) = bid {
+        if let Some(d) = bgm_details().get(&b) {
+            if !d.cover.is_empty() && !d.cover.contains("bgm.tv") {
+                url = Some(d.cover.clone());
+            }
+        }
+    }
+    // 2) Kitsu 按标题搜（日文标题优先）
+    if url.is_none() {
+        let q = title_native
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| title_cn.as_deref().filter(|s| !s.trim().is_empty()))
+            .map(str::to_string);
+        if let Some(q) = q {
+            url = kitsu_cover_for(&st, &q).await;
+        }
+    }
+    // 3) AniList（要代理）
+    if url.is_none() {
+        if let Some(a) = aid {
+            match anilist::fetch(&st.http, a).await {
+                Ok(m) => {
+                    if let Some(u) = m.cover_url.filter(|u| !u.is_empty()) {
+                        url = Some(u);
+                    }
+                }
+                Err(e) => eprintln!("[cover-bg] AniList 补封面失败 #{a}: {e:#}"),
+            }
+        }
+    }
+    let Some(url) = url else {
+        return;
+    };
+    if url.contains("bgm.tv") {
+        return; // 被墙源，留给 heal 兜底
+    }
+    let file = if let Some(b) = bid {
+        format!("bgm-{b}.jpg")
+    } else if let Some(a) = aid {
+        format!("{a}.jpg")
+    } else {
+        format!("k-{:x}.jpg", md5_of(&url))
+    };
+    let dest = st.data_dir.join("covers").join(&file);
+    let dl = if url.contains("kitsu") || url.contains("hdslb") {
+        bangumi::download_cover(&st.http, &url, &dest).await
+    } else {
+        anilist::download_cover(&st.http, &url, &dest).await
+    };
+    match dl {
+        Ok(()) => {
+            let conn = st.db.lock().expect("db mutex poisoned");
+            let _ = conn.execute(
+                "UPDATE works SET cover_path = ?2 WHERE id = ?1",
+                rusqlite::params![work_id, file],
+            );
+            println!("[cover-bg] 作品 #{work_id} 封面已就位: {file}");
+        }
+        Err(e) => eprintln!("[cover-bg] 作品 #{work_id} 封面下载失败: {e:#}"),
+    }
 }
 
 async fn patch_work(

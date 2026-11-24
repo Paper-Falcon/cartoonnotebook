@@ -299,11 +299,19 @@ export default function App() {
       setWorks((prev) =>
         prev.some((w) => w.id === work.id) ? prev : [work, ...prev],
       );
-      showToast(
-        work.coverPath
-          ? `已归档《${work.titleCn}》`
-          : `已归档《${work.titleCn}》，但封面没取到`,
-      );
+      showToast(`已归档《${work.titleCn}》`);
+      // 封面在后台下载：几秒后静默刷新让封面浮现
+      const refresh = () => {
+        listWorks()
+          .then((fresh) => {
+            setWorks((prev) =>
+              prev.map((w) => fresh.find((f) => f.id === w.id) ?? w),
+            );
+          })
+          .catch(() => undefined);
+      };
+      window.setTimeout(refresh, 4000);
+      window.setTimeout(refresh, 10000);
     } catch (e) {
       showToast(`加入失败：${e instanceof Error ? e.message : String(e)}`);
     }
