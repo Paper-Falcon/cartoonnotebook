@@ -66,6 +66,9 @@ async function loadArchiveAnime() {
       year: s.date ? Number(String(s.date).slice(0, 4)) || 0 : 0,
       eps: s.eps ?? null,
       summary: (s.summary || "").trim(),
+      tags: (Array.isArray(s.meta_tags) ? s.meta_tags : []).filter(
+        (t) => !("" + t).includes("日本") && !("" + t).includes("中国"),
+      ),
       isCn: tags.includes("中国"),
     });
   }
@@ -95,6 +98,7 @@ for (const x of archiveAll) {
     year: x.year,
     eps: x.eps,
     summary,
+    tags: x.tags,
     // Kitsu 匹配过的封面地址最宝贵，必须保留；否则回落到被墙地址
     cover: prev && prev.cover && prev.cover.includes("kitsu")
       ? prev.cover

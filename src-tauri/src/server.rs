@@ -500,20 +500,41 @@ async fn create_work(
 
     // 联网补全失败不阻断入库：有 anilistId 走 AniList，只有 bangumiId 走 Bangumi
     let mut meta = anilist::AnimeMeta::default();
-    if let Some(aid) = body.anilist_id {
-        match anilist::fetch(&st.http, aid).await {
-            Ok(m) => meta = m,
-            Err(e) => eprintln!("[anilist] 补全失败 #{aid}: {e:#}"),
-        }
-    } else if let Some(bid) = body.bangumi_id {
-        // 国漫：优先用烘焙进索引的离线详情（Archive 数据，不依赖网络），
-        // 索引里没有的再去 Bangumi 在线拉
+    // 离线优先：全库 31312 条动画都有烘焙详情（含日漫），秒回不等网络。
+    // 网络源（AniList / Bangumi 在线）只在离线详情缺失时兜底。
+    if let Some(bid) = body.bangumi_id {
         match offline_bgm_meta(bid) {
             Some(m) => meta = m.into(),
             None => match bangumi::subject_meta(&st.http, bid).await {
                 Ok(m) => meta = m.into(),
                 Err(e) => eprintln!("[bangumi] 补全失败 #{bid}: {e:#}"),
             },
+        }
+    }
+    let offline_used = !meta.title_cn.is_some() && !meta.title_native.is_some();
+    let _ = offline_used;
+    if meta.title_cn.is_none()
+        && meta.title_native.is_none()
+        && meta.description.is_none()
+    {
+        // 离线详情也没给足信息：有 AniList 编号就试一次（被墙时 4 秒即放弃）
+        if let Some(aid) = body.anilist_id {
+            match anilist::fetch(&st.http, aid).await {
+                Ok(m) => meta = m,
+                Err(e) => eprintln!("[anilist] 补全失败 #{aid}: {e:#}"),
+            }
+        }
+        // AniList 也不行再试 Bangumi 在线
+        if meta.title_cn.is_none()
+            && meta.title_native.is_none()
+            && meta.description.is_none()
+        {
+            if let Some(bid) = body.bangumi_id {
+                match bangumi::subject_meta(&st.http, bid).await {
+                    Ok(m) => meta = m.into(),
+                    Err(e) => eprintln!("[bangumi] 补全失败 #{bid}: {e:#}"),
+                }
+            }
         }
     }
 
@@ -2263,6 +2284,8 @@ pub struct BgmDetail {
     pub summary: String,
     #[serde(default)]
     pub cover: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 pub const BGM_DETAILS: &[u8] = include_bytes!("../assets/bgm-details.json");
@@ -2333,6 +2356,7 @@ fn offline_bgm_meta(bid: i64) -> Option<bangumi::SubjectMeta> {
     let jp = (!d.jp.trim().is_empty()).then(|| d.jp.trim().to_string());
     let summary = (!d.summary.trim().is_empty()).then(|| d.summary.trim().to_string());
     let cover = (!d.cover.trim().is_empty()).then(|| d.cover.trim().to_string());
+    let genres = d.tags.clone();
     Some(bangumi::SubjectMeta {
         name_cn: cn,
         name: jp,
@@ -2340,6 +2364,7 @@ fn offline_bgm_meta(bid: i64) -> Option<bangumi::SubjectMeta> {
         episodes: d.eps,
         summary,
         cover_url: cover,
+        genres: d.tags.clone(),
     })
 }
 

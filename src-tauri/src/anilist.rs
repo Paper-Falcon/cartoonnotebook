@@ -89,6 +89,7 @@ pub async fn fetch(client: &reqwest::Client, id: i64) -> Result<AnimeMeta> {
     let resp = client
         .post(ENDPOINT)
         .header("User-Agent", "CartoonNotebook/0.1")
+        .timeout(std::time::Duration::from_secs(4))
         .json(&body)
         .send()
         .await

@@ -15,6 +15,7 @@ pub struct SubjectMeta {
     pub episodes: Option<i64>,
     pub summary: Option<String>,
     pub cover_url: Option<String>,
+    pub genres: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -84,6 +85,7 @@ fn to_meta(s: &Subject) -> SubjectMeta {
             .clone()
             .or(s.images.common.clone())
             .or(s.images.medium.clone()),
+            genres: vec![],
     }
 }
 
@@ -151,7 +153,7 @@ impl From<SubjectMeta> for crate::anilist::AnimeMeta {
             episodes: m.episodes,
             format: None,
             description: m.summary,
-            genres: vec![],
+            genres: m.genres,
             cover_url: m.cover_url,
         }
     }
