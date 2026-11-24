@@ -2551,8 +2551,9 @@ html.has-wallpaper .topbar {
 .win-controls button {
   width: 46px;
   height: 38px;
-  border: 0;
-  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(8px);
   border-radius: 10px;
   cursor: pointer;
   color: var(--ink-2);
@@ -2560,10 +2561,16 @@ html.has-wallpaper .topbar {
   line-height: 1;
   display: grid;
   place-items: center;
+  transition: background 0.15s ease;
+}
+
+.win-controls button:hover {
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(12px);
 }
 
 .win-controls button:active {
-  background: rgba(31, 29, 26, 0.14);
+  background: rgba(255, 255, 255, 0.6);
 }
 
 .win-controls button:hover {
@@ -2572,5 +2579,7 @@ html.has-wallpaper .topbar {
 
 .win-controls .win-close:hover {
   background: #e81123;
+  backdrop-filter: none;
+  border-color: #e81123;
   color: #fff;
 }
