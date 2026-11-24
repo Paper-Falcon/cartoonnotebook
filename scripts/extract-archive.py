@@ -24,10 +24,9 @@ with zipfile.ZipFile(zip_path) as z:
                 continue
             if s.get("type") != 2:
                 continue
-            # meta_tags 里的「中国」标签是 bgm.tv 的权威国别信号
-            tags = s.get("meta_tags") or []
-            if not isinstance(tags, list) or "中国" not in tags:
-                continue
+            # 输出全部动画：国漫（meta_tags「中国」）用于封面+简介，
+            # 日漫用于标题修正与离线详情
+            pass
             dst.write(raw)
             kept += 1
     print(f"扫描 {seen} 条，动画 {kept} 条国漫已过滤写入")

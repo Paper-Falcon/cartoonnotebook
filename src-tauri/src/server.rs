@@ -518,6 +518,25 @@ async fn create_work(
     }
 
     let mut cover_path = None;
+    // Kitsu 兜底：详情里没有可达封面地址时，按标题搜一次（结果缓存）
+    if meta
+        .cover_url
+        .as_deref()
+        .map(|u| u.is_empty() || u.contains("bgm.tv"))
+        .unwrap_or(true)
+    {
+        let query = meta
+            .title_native
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| meta.title_cn.as_deref().filter(|s| !s.trim().is_empty()))
+            .map(str::to_string);
+        if let Some(q) = query {
+            if let Some(url) = kitsu_cover_for(&st, &q).await {
+                meta.cover_url = Some(url);
+            }
+        }
+    }
     if let (Some(url), Some(bid)) = (&meta.cover_url, body.bangumi_id) {
         // lain.bgm.tv 被墙，别白等 20 秒超时；离线详情里已换成 Kitsu 地址的才下载
         if url.contains("bgm.tv") {
@@ -528,6 +547,19 @@ async fn create_work(
             match bangumi::download_cover(&st.http, url, &dest).await {
                 Ok(()) => cover_path = Some(file),
                 Err(e) => eprintln!("[cover] 下载失败 #{bid}: {e:#}"),
+            }
+        }
+    } else if (meta.cover_url.is_some()) && body.bangumi_id.is_none() && body.anilist_id.is_none() {
+        // 既没有 bgm 也没有 anilist 编号（如手动补录），但有标题能搜到封面：
+        // 存成 bgm-标题哈希文件，避免和已有封面撞名
+        let Some(url) = &meta.cover_url else { unreachable!() };
+        if !url.contains("bgm.tv") {
+            let key = format!("{:x}", md5_of(url));
+            let file = format!("k-{key}.jpg");
+            let dest = st.data_dir.join("covers").join(&file);
+            match bangumi::download_cover(&st.http, url, &dest).await {
+                Ok(()) => cover_path = Some(file),
+                Err(e) => eprintln!("[cover] 下载失败: {e:#}"),
             }
         }
     } else if let (Some(url), Some(aid)) = (&meta.cover_url, body.anilist_id) {
@@ -2212,6 +2244,54 @@ fn bgm_details() -> &'static std::collections::HashMap<i64, BgmDetail> {
     })
 }
 
+
+// ---------- Kitsu 运行时兜底（查一次缓存一次，避免重复搜索） ----------
+
+fn kitsu_cache_path(state: &AppState) -> std::path::PathBuf {
+    state.data_dir.join("kitsu-cache.json")
+}
+
+fn kitsu_cache_load(state: &AppState) -> std::collections::HashMap<String, String> {
+    std::fs::read_to_string(kitsu_cache_path(state))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn kitsu_cache_store(state: &AppState, map: &std::collections::HashMap<String, String>) {
+    if let Ok(s) = serde_json::to_string(map) {
+        let _ = std::fs::write(kitsu_cache_path(state), s);
+    }
+}
+
+/// Kitsu 搜海报：标题 → 封面地址。结果（含未命中）写缓存。
+async fn kitsu_cover_for(state: &AppState, query: &str) -> Option<String> {
+    let q = query.trim();
+    if q.is_empty() {
+        return None;
+    }
+    let mut cache = kitsu_cache_load(state);
+    if let Some(hit) = cache.get(q) {
+        return (!hit.is_empty()).then(|| hit.clone());
+    }
+    match crate::kitsu::find_cover(&state.http, q).await {
+        Ok(Some(url)) => {
+            cache.insert(q.to_string(), url.clone());
+            kitsu_cache_store(state, &cache);
+            Some(url)
+        }
+        Ok(None) => {
+            cache.insert(q.to_string(), String::new());
+            kitsu_cache_store(state, &cache);
+            None
+        }
+        Err(e) => {
+            eprintln!("[kitsu] 搜索「{q}」失败: {e:#}");
+            None
+        }
+    }
+}
+
 fn offline_bgm_meta(bid: i64) -> Option<bangumi::SubjectMeta> {
     let d = bgm_details().get(&bid)?;
     let cn = (!d.cn.trim().is_empty()).then(|| d.cn.trim().to_string());
@@ -2229,6 +2309,16 @@ fn offline_bgm_meta(bid: i64) -> Option<bangumi::SubjectMeta> {
 }
 
 // ---------- 外观设置（字体 / 文字颜色） ----------
+
+
+fn md5_of(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.as_bytes() {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
 
 fn sane_font(name: &str) -> String {
     // 字体名会拼进 CSS font-family 的引号里，剥掉引号/反斜杠/分号防注入
@@ -2286,13 +2376,16 @@ async fn set_appearance(
 /// 启动后补齐已有国漫作品的封面：库里 bangumi_id 有值但没封面的，
 /// 从离线详情里取 Kitsu 图源地址下载（一次最多 60 部，间隔 400ms）
 pub async fn heal_bgm_covers(state: Arc<AppState>) {
-    let pending: Vec<(i64, i64)> = {
+    let pending: Vec<(i64, Option<i64>, Option<i64>, Option<String>, Option<String>)> = {
         let conn = state.db.lock().expect("db mutex poisoned");
         let mut out = Vec::new();
         if let Ok(mut stmt) = conn.prepare(
-            "SELECT id, bangumi_id FROM works WHERE bangumi_id > 0 AND (cover_path IS NULL OR cover_path = '')",
+            "SELECT id, bangumi_id, anilist_id, title_cn, title_jp FROM works \
+             WHERE (bangumi_id > 0 OR anilist_id > 0) AND (cover_path IS NULL OR cover_path = '')",
         ) {
-            if let Ok(rows) = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))) {
+            if let Ok(rows) = stmt.query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            }) {
                 out = rows.filter_map(Result::ok).collect();
             }
         }
@@ -2301,17 +2394,35 @@ pub async fn heal_bgm_covers(state: Arc<AppState>) {
     if pending.is_empty() {
         return;
     }
+    println!("[cover-heal] 发现 {} 部作品缺封面，开始补齐", pending.len());
     let mut healed = 0;
-    for (id, bid) in pending.into_iter().take(60) {
-        let Some(d) = bgm_details().get(&bid) else {
+    for (id, bid, aid, title_cn, title_jp) in pending.into_iter().take(60) {
+        // 来源一：离线详情里烘焙的 Kitsu 地址（国漫）
+        let mut url = bid
+            .and_then(|b| bgm_details().get(&b))
+            .map(|d| d.cover.clone())
+            .filter(|c| !c.is_empty() && !c.contains("bgm.tv"));
+        // 来源二：Kitsu 按标题搜（日文标题优先）
+        if url.is_none() {
+            let q = if title_jp.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false) {
+                title_jp.clone().unwrap()
+            } else {
+                title_cn.clone().unwrap_or_default()
+            };
+            url = kitsu_cover_for(&state, &q).await;
+        }
+        let Some(url) = url else {
             continue;
         };
-        if d.cover.is_empty() || d.cover.contains("bgm.tv") {
-            continue;
-        }
-        let file = format!("bgm-{bid}.jpg");
+        let file = if let Some(b) = bid {
+            format!("bgm-{b}.jpg")
+        } else if let Some(a) = aid {
+            format!("{a}.jpg")
+        } else {
+            format!("k-{:x}.jpg", md5_of(&url))
+        };
         let dest = state.data_dir.join("covers").join(&file);
-        match bangumi::download_cover(&state.http, &d.cover, &dest).await {
+        match bangumi::download_cover(&state.http, &url, &dest).await {
             Ok(()) => {
                 let conn = state.db.lock().expect("db mutex poisoned");
                 let _ = conn.execute(
@@ -2320,11 +2431,11 @@ pub async fn heal_bgm_covers(state: Arc<AppState>) {
                 );
                 healed += 1;
             }
-            Err(e) => eprintln!("[cover-heal] #{bid} 封面下载失败: {e:#}"),
+            Err(e) => eprintln!("[cover-heal] 封面下载失败 #{id}: {e:#}"),
         }
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
     }
     if healed > 0 {
-        println!("[cover-heal] 已补齐 {healed} 张国漫封面");
+        println!("[cover-heal] 已补齐 {healed} 张封面");
     }
 }

@@ -1,6 +1,7 @@
 pub mod anilist;
 pub mod bangumi;
 pub mod db;
+pub mod kitsu;
 pub mod server;
 
 use std::sync::Arc;

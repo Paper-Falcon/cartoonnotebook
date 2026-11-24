@@ -43,59 +43,72 @@ const exists = async (p) => {
   try { await fs.stat(p); return true; } catch { return false; }
 };
 
-async function loadArchiveCn() {
-  const zip = path.resolve(".cache/bgm-archive-dump.zip");
-  const lines = path.resolve(".cache/bgm-archive-subjects.jsonl");
-  if (!(await exists(zip))) {
-    console.log("没有 .cache/bgm-archive-dump.zip，跳过国漫合并（不影响日漫索引）");
+async function loadArchiveAnime() {
+  const lines = path.resolve(".cache/bgm-archive-anime.jsonl");
+  if (!(await exists(lines))) {
+    console.log("没有 .cache/bgm-archive-anime.jsonl，先跑 extract-archive.py");
     return [];
   }
-  if (!(await exists(lines))) {
-    console.log("解包 Archive dump（只取 subject.jsonlines，稍等）…");
-    execSync(
-      `python scripts/extract-archive.py "${zip}" "${lines}"`,
-      { stdio: "inherit" },
-    );
-  }
   const text = await fs.readFile(lines, "utf8");
-  const cn = [];
+  const all = [];
   for (const line of text.split("\n")) {
     if (!line) continue;
     let s;
     try { s = JSON.parse(line); } catch { continue; }
-    if (s.type !== 2) continue; // 2 = 动画（国漫已由 extract-archive.py 按「中国」标签过滤）
     const nameCn = (s.name_cn || "").trim();
     const name = (s.name || "").trim();
     if (!nameCn && !name) continue;
-    cn.push({
+    const tags = Array.isArray(s.meta_tags) ? s.meta_tags : [];
+    all.push({
       id: s.id,
       cn: nameCn || name,
       jp: name,
       year: s.date ? Number(String(s.date).slice(0, 4)) || 0 : 0,
       eps: s.eps ?? null,
       summary: (s.summary || "").trim(),
-      cover: s.images?.large || s.images?.common || s.images?.medium || "",
-      platform: s.platform || "",
+      isCn: tags.includes("中国"),
     });
   }
-  console.log(`Archive 中国动画: ${cn.length} 条`);
-  return cn;
+  console.log(`Archive 动画总数: ${all.length} 条（其中国漫 ${all.filter((x) => x.isCn).length} 条）`);
+  return all;
 }
 
-const archiveCn = await loadArchiveCn();
-const archiveById = new Map(archiveCn.map((x) => [x.id, x]));
+const archiveAll = await loadArchiveAnime();
+const archiveById = new Map(archiveAll.map((x) => [x.id, x]));
+const archiveCn = archiveAll.filter((x) => x.isCn);
+
+// ---------- 离线详情：全部动画 ----------
+// 国漫带完整简介；日漫简介截到 150 字（控制 exe 体积）；
+// 封面地址沿用之前的 Kitsu 匹配结果（缓存里有的保留）
+const prevDetails = await exists(path.resolve("src-tauri/assets/bgm-details.json"))
+  ? JSON.parse(await fs.readFile(path.resolve("src-tauri/assets/bgm-details.json"), "utf8"))
+  : {};
 const details = {};
-for (const x of archiveCn) {
+for (const x of archiveAll) {
+  const prev = prevDetails[String(x.id)];
+  const summary = x.isCn
+    ? x.summary.slice(0, 1200)
+    : x.summary.slice(0, 150);
   details[x.id] = {
-    cn: x.cn, jp: x.jp, year: x.year, eps: x.eps,
-    summary: x.summary.slice(0, 1200), cover: x.cover,
+    cn: x.cn,
+    jp: x.jp,
+    year: x.year,
+    eps: x.eps,
+    summary,
+    // Kitsu 匹配过的封面地址最宝贵，必须保留；否则回落到被墙地址
+    cover: prev && prev.cover && prev.cover.includes("kitsu")
+      ? prev.cover
+      : x.isCn
+        ? (prev?.cover || "")
+        : "",
+    isCn: x.isCn,
   };
 }
 await fs.writeFile(
   path.resolve("src-tauri/assets/bgm-details.json"),
   JSON.stringify(details),
 );
-console.log(`bgm-details.json 已写出（${Object.keys(details).length} 条）`);
+console.log(`bgm-details.json 已写出（${Object.keys(details).length} 条，含 Kitsu 封面 ${Object.values(details).filter((d) => d.cover.includes("kitsu")).length} 条）`);
 
 for (const it of data.items) {
   if (!TYPES.has(it.type)) continue;
@@ -120,6 +133,25 @@ for (const it of data.items) {
     it.type,
   ]);
 }
+
+// ---------- 标题修正：Archive 的 name_cn 更权威 ----------
+// 例：bangumi-data 把「彻夜之歌」错写成「夜曲」，用 dump 的中文名纠正并重算拼音
+let fixed = 0;
+for (const r of items) {
+  const bid = r[4];
+  if (!bid) continue;
+  const anime = archiveById.get(bid);
+  if (!anime) continue;
+  const betterCn = anime.cn && anime.cn !== r[0] ? anime.cn : null;
+  if (betterCn) {
+    r[0] = betterCn;
+    r[5] = pyFull(betterCn);
+    r[6] = pyInitial(betterCn);
+    r[7] = pyInitial(betterCn.replace(DROP_PARTICLES, ""));
+    fixed++;
+  }
+}
+console.log(`标题修正: ${fixed} 条（例：彻夜之歌）`);
 
 // ---------- Archive 国漫并入索引（bangumiId 去重，已存在的跳过） ----------
 const seenBgm = new Set(items.map((r) => r[4]).filter(Boolean));
