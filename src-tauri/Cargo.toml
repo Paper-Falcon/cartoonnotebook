@@ -42,6 +42,9 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 rand = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+[target."cfg(windows)".dependencies]
+winreg = "0.55"
+
 # 调试信息降到 1 级：保留行号，内存占用小一半，这台机器内存紧张时编译不会被 OOM 杀掉
 [features]
 # 加上这个 feature 才会编译 devserver（接口测试工具，打包时不需要）

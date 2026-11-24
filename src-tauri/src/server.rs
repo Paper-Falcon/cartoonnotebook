@@ -63,9 +63,19 @@ impl AppState {
             }
         };
 
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(20))
-            .build()?;
+        // 跟随 Windows 系统代理：用户开了代理（系统代理模式）时，
+        // AniList / Bangumi 这类被墙的在线源才能通
+        let mut builder =
+            reqwest::Client::builder().timeout(Duration::from_secs(20));
+        #[cfg(windows)]
+        if let Some(proxy) = system_proxy() {
+            println!("[net] 使用系统代理 {proxy}");
+            match reqwest::Proxy::all(&proxy) {
+                Ok(p) => builder = builder.proxy(p),
+                Err(e) => eprintln!("[net] 系统代理解析失败: {e}"),
+            }
+        }
+        let http = builder.build()?;
         Ok(Self {
             db: Mutex::new(conn),
             data_dir,
@@ -2119,4 +2129,41 @@ async fn restore_backup(
     }
 
     Ok(Json(json!({ "ok": true, "requiresRestart": true })))
+}
+
+/// 读 Windows 系统代理（IE/WinINET 设置）。未开启返回 None。
+#[cfg(windows)]
+fn system_proxy() -> Option<String> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey("Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings")
+        .ok()?;
+    let enabled: u32 = key.get_value("ProxyEnable").ok()?;
+    if enabled != 1 {
+        return None;
+    }
+    let server: String = key.get_value("ProxyServer").ok()?;
+    // ProxyServer 可能是 "host:port"，也可能是 "http=..;https=..;ftp=.." 的按协议形式
+    let addr = if server.contains('=') {
+        server.split(';').find_map(|kv| {
+            let mut it = kv.splitn(2, '=');
+            let k = it.next()?.trim().to_lowercase();
+            let v = it.next()?.trim().to_string();
+            if v.is_empty() {
+                return None;
+            }
+            if k == "https" || k == "http" || k.is_empty() {
+                Some(v)
+            } else {
+                None
+            }
+        })?
+    } else {
+        server.trim().to_string()
+    };
+    if addr.is_empty() {
+        return None;
+    }
+    Some(format!("http://{addr}"))
 }

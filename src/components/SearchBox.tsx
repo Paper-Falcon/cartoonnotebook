@@ -60,6 +60,7 @@ export default function SearchBox({
   // 本地索引没有命中时，自动去 Bangumi 搜（国漫的主力来源）
   const [bgm, setBgm] = useState<BgmHit[]>([]);
   const [bgmBusy, setBgmBusy] = useState(false);
+  const [bgmError, setBgmError] = useState<string | null>(null);
 
   useEffect(() => {
     const kw = q.trim();
@@ -70,13 +71,22 @@ export default function SearchBox({
     }
     let alive = true;
     setBgmBusy(true);
+    setBgmError(null);
     const timer = window.setTimeout(() => {
       bgmSearch(kw)
         .then((hits) => {
           if (alive) setBgm(hits);
         })
-        .catch(() => {
-          if (alive) setBgm([]); // 网络不通就当没有，不影响本地候选
+        .catch((e: unknown) => {
+          // 把失败亮出来：否则用户分不清"没有"和"连不上"
+          if (alive) {
+            setBgm([]);
+            setBgmError(
+              e instanceof Error
+                ? e.message
+                : "Bangumi 连不上（可能需要开启代理的系统代理模式）",
+            );
+          }
         })
         .finally(() => {
           if (alive) setBgmBusy(false);
@@ -274,6 +284,14 @@ export default function SearchBox({
             </>
           )}
 
+          {bgmError && (
+            <div className="result-empty">
+              Bangumi 连不上，国漫在线搜索不可用
+              <span>{bgmError}</span>
+              <span>开代理的「系统代理」模式后重试即可</span>
+            </div>
+          )}
+
           {(bgm.length > 0 || bgmBusy) && (
             <>
               <div className="result-group">Bangumi 在线 · 国漫也能搜</div>
@@ -312,7 +330,11 @@ export default function SearchBox({
             </>
           )}
 
-          {local.length === 0 && remote.length === 0 && bgm.length === 0 && (
+          {local.length === 0 &&
+            remote.length === 0 &&
+            bgm.length === 0 &&
+            !bgmBusy &&
+            !bgmError && (
             <div className="result-empty">
               {!indexReady
                 ? "索引载入中…"
@@ -320,8 +342,8 @@ export default function SearchBox({
                   ? "Bangumi 搜索中…"
                   : `没找到「${q.trim()}」`}
               <span>国漫会自动去 Bangumi 搜；日漫可以试试日文原名</span>
-            </div>
-          )}
+              </div>
+            )}
 
           <div className="result-foot">
             索引 {indexSize.toLocaleString()} 部 · 库里 {works.length} 部

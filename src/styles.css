@@ -2344,3 +2344,12 @@ html.has-wallpaper body {
   background: rgba(90, 84, 74, 0.92);
   color: #f3efe8;
 }
+
+.result-empty span {
+  display: block;
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-size: 11px;
+  word-break: break-all;
+  text-align: left;
+}
