@@ -69,6 +69,10 @@ scripts/               索引构建、图标生成、快捷方式、冒烟测试
 docs/技术方案-v2.md    设计与踩坑记录
 ```
 
+## 致谢
+
+- [WebWallGL](https://www.npmjs.com/package/webwallgl)（MIT License, © elysia395）——场景壁纸的 WebGL 实时渲染内核，`public/vendor/` 内含其 UMD 构建与许可证副本
+
 ## 声明
 
 图标取自动漫截图，仅供个人使用。Wallpaper Engine 壁纸仅读取本机已下载的创意工坊文件。

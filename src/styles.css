@@ -2353,3 +2353,23 @@ html.has-wallpaper body {
   word-break: break-all;
   text-align: left;
 }
+
+/* ---------- 场景壁纸（WebWallGL canvas） ---------- */
+
+.wallpaper-layer .wallpaper-canvas {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.wallpaper-layer .wallpaper-canvas canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.wp-static.is-scene {
+  background: rgba(63, 145, 94, 0.92);
+  color: #fff;
+}

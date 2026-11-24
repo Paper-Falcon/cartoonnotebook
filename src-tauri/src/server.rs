@@ -211,6 +211,7 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/wallpapers/:id/entry/*rest",
             get(wallpaper_entry_asset),
         )
+        .route("/api/wallpapers/:id/file/*rest", get(wallpaper_entry_asset))
         .route("/api/wallpaper", get(get_wallpaper).patch(set_wallpaper))
         .route("/api/pair", get(pair_info))
         .route("/pair", get(pair_landing))

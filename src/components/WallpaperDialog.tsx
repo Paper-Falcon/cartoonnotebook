@@ -104,7 +104,7 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
 
         <h2>背景壁纸</h2>
         <p className="pair-sub">
-          读的是 Wallpaper Engine 创意工坊目录。视频壁纸循环播放；场景、网页壁纸和识别不出编码的视频，自动用预览图当静态背景——全部可选。
+          读的是 Wallpaper Engine 创意工坊目录。视频循环播放、网页与场景壁纸实时渲染（内置 WebWallGL 引擎）；放不了的自动退回预览图。
         </p>
 
         <div className="wp-controls">
@@ -166,7 +166,7 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
           <span className="wp-count">
             {list === null
               ? "扫描中…"
-              : `${usable.length} 个可选 · 视频 ${videoCount} · 网页 ${webCount} · 静态 ${usable.length - videoCount - webCount}`}
+              : `${usable.length} 个可选 · 视频 ${videoCount} · 网页 ${webCount} · 场景 ${usable.length - videoCount - webCount}`}
             {local?.title ? ` · 当前：${local.title}` : ""}
           </span>
         </div>
@@ -200,10 +200,12 @@ export default function WallpaperDialog({ state, onClose, onChanged, onToast }: 
                     ? formatBytes(w.bytes)
                     : w.entry
                       ? "网页动态"
-                      : "静态"}
+                      : "场景动态"}
                   {w.tags[0] ? ` · ${w.tags[0]}` : ""}
                 </span>
-                {!w.video && !w.entry && <span className="wp-static">静态</span>}
+                {!w.video && !w.entry && (
+                  <span className="wp-static is-scene">场景</span>
+                )}
                 {w.entry && !w.video && <span className="wp-static is-web">网页</span>}
                 {local?.unplayable?.includes(w.id) && (
                   <span className="wp-static is-dim">已降级</span>

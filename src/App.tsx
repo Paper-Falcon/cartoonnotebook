@@ -8,6 +8,8 @@ import TagsDialog from "./components/TagsDialog";
 import WallpaperDialog from "./components/WallpaperDialog";
 import { Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTag, getWallpaperSetting, setWallpaperSetting, listTags, listWorks, patchWork, removeWork, wallpaperEntryUrl, wallpaperPreviewUrl, wallpaperVideoUrl } from "./lib/api";
 import { Candidate, loadIndex } from "./lib/search";
+import { loadWebWallGL, SceneHandle } from "./lib/scenewall";
+import { API_BASE } from "./lib/api";
 import { genreLabel, parseGenres } from "./lib/genres";
 
 const TABS = [
@@ -388,14 +390,11 @@ export default function App() {
               scrolling="no"
             />
           ) : (
-            <img
-              src={wallpaperPreviewUrl(wall.id)}
-              alt=""
-              style={{
-                objectFit: wall.fit === "contain" ? "contain" : "cover",
-                filter: wall.blur > 0 ? `blur(${wall.blur}px)` : undefined,
-                transform: wall.blur > 0 ? "scale(1.04)" : undefined,
-              }}
+            <SceneLayer
+              key={wall.id}
+              id={wall.id}
+              fit={wall.fit === "contain" ? "contain" : "cover"}
+              blur={wall.blur}
             />
           )}
           <div
@@ -728,5 +727,98 @@ export default function App() {
       )}
       </div>
     </>
+  );
+}
+
+
+type AnyInst = {
+  destroy: (opts?: unknown) => void;
+  pause: () => void;
+  resume: () => void;
+};
+
+/**
+ * 场景壁纸层：WebWallGL 实时渲染（引擎失败时自动兜底成预览图）。
+ * 应用窗口隐藏时暂停渲染循环。
+ */
+function SceneLayer({
+  id,
+  fit,
+  blur,
+}: {
+  id: string;
+  fit: "cover" | "contain";
+  blur: number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    let handle: SceneHandle | null = null;
+    let onVis: (() => void) | null = null;
+
+    (async () => {
+      try {
+        const lib = await loadWebWallGL();
+        if (cancelled || !ref.current) return;
+        const inst = (await lib.mount(ref.current, {
+          source: lib.httpSource(`${API_BASE}/api/wallpapers/${id}/file/`),
+          fit,
+          fps: 30,
+          volume: 0,
+        })) as AnyInst;
+        handle = {
+          destroy: () => {
+            try {
+              inst.destroy();
+            } catch {
+              // 关窗竞态下引擎可能已自毁
+            }
+          },
+        };
+        onVis = () => {
+          try {
+            if (document.hidden) inst.pause();
+            else inst.resume();
+          } catch {
+            // 引擎可能已销毁
+          }
+        };
+        document.addEventListener("visibilitychange", onVis);
+      } catch {
+        if (!cancelled) setFailed(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (onVis) document.removeEventListener("visibilitychange", onVis);
+      handle?.destroy();
+    };
+  }, [id, fit]);
+
+  if (failed) {
+    return (
+      <img
+        src={wallpaperPreviewUrl(id)}
+        alt=""
+        style={{
+          objectFit: fit === "contain" ? "contain" : "cover",
+          filter: blur > 0 ? `blur(${blur}px)` : undefined,
+          transform: blur > 0 ? "scale(1.04)" : undefined,
+        }}
+      />
+    );
+  }
+  return (
+    <div
+      ref={ref}
+      className="wallpaper-canvas"
+      style={{
+        filter: blur > 0 ? `blur(${blur}px)` : undefined,
+        transform: blur > 0 ? "scale(1.04)" : undefined,
+      }}
+    />
   );
 }
