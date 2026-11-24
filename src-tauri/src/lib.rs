@@ -17,6 +17,14 @@ pub fn run() {
     );
 
     tauri::Builder::default()
+        // 单实例：第二次启动只聚焦已有窗口，避免抢 8787 端口变空壳。
+        // 必须第一个注册
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(state.clone())
         .setup(move |app| {
