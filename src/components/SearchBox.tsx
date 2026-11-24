@@ -6,6 +6,7 @@ interface Props {
   indexReady: boolean;
   indexSize: number;
   existing: Set<number>;
+  existingBgm: Set<number>;
   initialQuery?: string;
   works: Work[];
   onAdd: (c: Candidate) => Promise<void>;
@@ -21,6 +22,7 @@ export default function SearchBox({
   indexReady,
   indexSize,
   existing,
+  existingBgm,
   initialQuery = "",
   works,
   onAdd,
@@ -55,7 +57,13 @@ export default function SearchBox({
   const remote = useMemo(() => {
     if (!q.trim()) return [];
     return search(q)
-      .filter((c) => !(c.anilistId > 0 && existing.has(c.anilistId)))
+      .filter(
+        (c) =>
+          !(
+            (c.anilistId > 0 && existing.has(c.anilistId)) ||
+            (c.bangumiId > 0 && existingBgm.has(c.bangumiId))
+          ),
+      )
       .slice(0, 6);
   }, [q, indexReady, indexSize, existing]);
 
@@ -104,7 +112,9 @@ export default function SearchBox({
     () => [
       ...local.map((work) => ({ kind: "local" as const, work })),
       ...remote.map((c) => ({ kind: "remote" as const, c })),
-      ...bgm.map((h) => ({ kind: "bgm" as const, h })),
+      ...bgm
+        .filter((h) => !(h.id > 0 && existingBgm.has(h.id)))
+        .map((h) => ({ kind: "bgm" as const, h })),
     ],
     [local, remote, bgm],
   );

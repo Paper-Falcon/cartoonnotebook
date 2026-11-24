@@ -193,6 +193,10 @@ export default function App() {
     () => new Set(works.map((w) => w.anilistId ?? -1)),
     [works],
   );
+  const existingBgm = useMemo(
+    () => new Set(works.map((w) => w.bangumiId ?? -1)),
+    [works],
+  );
 
   // 支持 /?q=巨人 这种深链，方便直接打开搜索态
   const initialQuery = useMemo(
@@ -479,6 +483,7 @@ export default function App() {
           indexReady={indexReady}
           indexSize={indexSize}
           existing={existing}
+          existingBgm={existingBgm}
           initialQuery={initialQuery}
           works={works}
           onAdd={handleAdd}
