@@ -505,9 +505,14 @@ async fn create_work(
             Err(e) => eprintln!("[anilist] 补全失败 #{aid}: {e:#}"),
         }
     } else if let Some(bid) = body.bangumi_id {
-        match bangumi::subject_meta(&st.http, bid).await {
-            Ok(m) => meta = m.into(),
-            Err(e) => eprintln!("[bangumi] 补全失败 #{bid}: {e:#}"),
+        // 国漫：优先用烘焙进索引的离线详情（Archive 数据，不依赖网络），
+        // 索引里没有的再去 Bangumi 在线拉
+        match offline_bgm_meta(bid) {
+            Some(m) => meta = m.into(),
+            None => match bangumi::subject_meta(&st.http, bid).await {
+                Ok(m) => meta = m.into(),
+                Err(e) => eprintln!("[bangumi] 补全失败 #{bid}: {e:#}"),
+            },
         }
     }
 
@@ -2167,4 +2172,52 @@ fn system_proxy() -> Option<String> {
         return None;
     }
     Some(format!("http://{addr}"))
+}
+
+// ---------- 国漫离线详情（bgm-details.json，构建期由 Archive dump 烘焙） ----------
+
+#[derive(serde::Deserialize)]
+pub struct BgmDetail {
+    #[serde(default)]
+    pub cn: String,
+    #[serde(default)]
+    pub jp: String,
+    #[serde(default)]
+    pub year: i64,
+    #[serde(default)]
+    pub eps: Option<i64>,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub cover: String,
+}
+
+pub const BGM_DETAILS: &[u8] = include_bytes!("../assets/bgm-details.json");
+
+fn bgm_details() -> &'static std::collections::HashMap<i64, BgmDetail> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<i64, BgmDetail>> =
+        std::sync::OnceLock::new();
+    MAP.get_or_init(|| {
+        serde_json::from_slice(BGM_DETAILS)
+            .unwrap_or_else(|e| {
+                eprintln!("[bgm-details] 解析失败: {e}");
+                std::collections::HashMap::new()
+            })
+    })
+}
+
+fn offline_bgm_meta(bid: i64) -> Option<bangumi::SubjectMeta> {
+    let d = bgm_details().get(&bid)?;
+    let cn = (!d.cn.trim().is_empty()).then(|| d.cn.trim().to_string());
+    let jp = (!d.jp.trim().is_empty()).then(|| d.jp.trim().to_string());
+    let summary = (!d.summary.trim().is_empty()).then(|| d.summary.trim().to_string());
+    let cover = (!d.cover.trim().is_empty()).then(|| d.cover.trim().to_string());
+    Some(bangumi::SubjectMeta {
+        name_cn: cn,
+        name: jp,
+        year: (d.year > 0).then_some(d.year),
+        episodes: d.eps,
+        summary,
+        cover_url: cover,
+    })
 }

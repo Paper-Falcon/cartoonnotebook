@@ -32,6 +32,71 @@ async function load() {
 const data = await load();
 const items = [];
 
+// ---------- 国漫补充：Bangumi Archive 全量库（离线，不依赖代理） ----------
+// 下载 https://github.com/bangumi/Archive/releases（tag archive）最新
+// dump-*.zip 到 .cache/bgm-archive-dump.zip，从中提取 type=2 且 origin 含
+// 中国的动画条目，与 bangumi-data 合并。输出 details 到
+// src-tauri/assets/bgm-details.json（简介/集数/封面地址），供添加作品时离线补全。
+import { execSync } from "node:child_process";
+
+const exists = async (p) => {
+  try { await fs.stat(p); return true; } catch { return false; }
+};
+
+async function loadArchiveCn() {
+  const zip = path.resolve(".cache/bgm-archive-dump.zip");
+  const lines = path.resolve(".cache/bgm-archive-subjects.jsonl");
+  if (!(await exists(zip))) {
+    console.log("没有 .cache/bgm-archive-dump.zip，跳过国漫合并（不影响日漫索引）");
+    return [];
+  }
+  if (!(await exists(lines))) {
+    console.log("解包 Archive dump（只取 subject.jsonlines，稍等）…");
+    execSync(
+      `python scripts/extract-archive.py "${zip}" "${lines}"`,
+      { stdio: "inherit" },
+    );
+  }
+  const text = await fs.readFile(lines, "utf8");
+  const cn = [];
+  for (const line of text.split("\n")) {
+    if (!line) continue;
+    let s;
+    try { s = JSON.parse(line); } catch { continue; }
+    if (s.type !== 2) continue; // 2 = 动画（国漫已由 extract-archive.py 按「中国」标签过滤）
+    const nameCn = (s.name_cn || "").trim();
+    const name = (s.name || "").trim();
+    if (!nameCn && !name) continue;
+    cn.push({
+      id: s.id,
+      cn: nameCn || name,
+      jp: name,
+      year: s.date ? Number(String(s.date).slice(0, 4)) || 0 : 0,
+      eps: s.eps ?? null,
+      summary: (s.summary || "").trim(),
+      cover: s.images?.large || s.images?.common || s.images?.medium || "",
+      platform: s.platform || "",
+    });
+  }
+  console.log(`Archive 中国动画: ${cn.length} 条`);
+  return cn;
+}
+
+const archiveCn = await loadArchiveCn();
+const archiveById = new Map(archiveCn.map((x) => [x.id, x]));
+const details = {};
+for (const x of archiveCn) {
+  details[x.id] = {
+    cn: x.cn, jp: x.jp, year: x.year, eps: x.eps,
+    summary: x.summary.slice(0, 1200), cover: x.cover,
+  };
+}
+await fs.writeFile(
+  path.resolve("src-tauri/assets/bgm-details.json"),
+  JSON.stringify(details),
+);
+console.log(`bgm-details.json 已写出（${Object.keys(details).length} 条）`);
+
 for (const it of data.items) {
   if (!TYPES.has(it.type)) continue;
   const cn = it.titleTranslate?.["zh-Hans"]?.[0] ?? "";
@@ -55,6 +120,28 @@ for (const it of data.items) {
     it.type,
   ]);
 }
+
+// ---------- Archive 国漫并入索引（bangumiId 去重，已存在的跳过） ----------
+const seenBgm = new Set(items.map((r) => r[4]).filter(Boolean));
+let added = 0;
+for (const x of archiveCn) {
+  if (seenBgm.has(x.id)) continue;
+  seenBgm.add(x.id);
+  const base = x.cn || x.jp;
+  items.push([
+    base,
+    x.jp,
+    x.year || 0,
+    0, // AniList 上未必有，置 0；详情走 bgm-details.json
+    x.id,
+    pyFull(base),
+    pyInitial(base),
+    pyInitial(base.replace(DROP_PARTICLES, "")),
+    "tv",
+  ]);
+  added++;
+}
+console.log(`国漫并入索引: ${added} 条（索引总数 ${items.length}）`);
 
 await fs.mkdir(path.dirname(OUT), { recursive: true });
 const out = { v: 1, generatedAt: new Date().toISOString().slice(0, 10), items };
