@@ -9,6 +9,9 @@
   --accent: #b8472f;
   --accent-soft: #fbf0ec;
   --radius: 12px;
+  --glass-chip: rgba(255, 255, 255, 0.32);
+  --glass-chip-border: rgba(255, 255, 255, 0.38);
+  --glass-chip-hover: rgba(255, 255, 255, 0.5);
   --font-sans: "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
     system-ui, sans-serif;
   --font-mono: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
@@ -136,7 +139,7 @@ body {
   gap: 9px;
   height: 40px;
   padding: 0 12px;
-  background: var(--surface);
+  background: rgba(255, 255, 255, 0.45);
   border: 1px solid var(--line);
   border-radius: 10px;
   color: var(--ink-3);
@@ -617,7 +620,8 @@ body {
   display: flex;
   gap: 2px;
   padding: 3px;
-  background: #f3eee4;
+  background: rgba(255, 255, 255, 0.22);
+  backdrop-filter: blur(10px);
   border-radius: 10px;
 }
 
@@ -641,7 +645,7 @@ body {
 }
 
 .tab.is-active {
-  background: #fff;
+  background: rgba(255, 255, 255, 0.6);
   color: var(--ink);
   font-weight: 500;
   box-shadow: 0 1px 2px rgba(31, 29, 26, 0.08);
@@ -660,9 +664,10 @@ body {
 .sort {
   height: 32px;
   padding: 0 10px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--glass-chip-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--glass-chip);
+  backdrop-filter: blur(10px);
   font-family: inherit;
   font-size: 12.5px;
   color: var(--ink-2);
@@ -689,13 +694,19 @@ body {
   gap: 6px;
   height: 32px;
   padding: 0 12px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--glass-chip-border);
   border-radius: 8px;
-  background: #fff;
+  background: var(--glass-chip);
+  backdrop-filter: blur(10px);
   font: inherit;
   font-size: 12.5px;
   color: var(--ink-2);
   cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.filter-toggle:hover {
+  background: var(--glass-chip-hover);
 }
 
 .filter-toggle:hover {
@@ -1452,17 +1463,20 @@ video.lightbox-media {
   margin-right: 12px;
   height: 26px;
   padding: 0 10px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--glass-chip-border);
   border-radius: 999px;
-  background: #fff;
+  background: var(--glass-chip);
+  backdrop-filter: blur(10px);
   font: inherit;
   font-size: 11.5px;
   color: var(--ink-2);
   cursor: pointer;
   white-space: nowrap;
+  transition: background 0.15s ease;
 }
 
 .pair-btn:hover {
+  background: var(--glass-chip-hover);
   border-color: rgba(184, 71, 47, 0.4);
   color: var(--accent);
 }
