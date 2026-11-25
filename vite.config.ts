@@ -12,7 +12,7 @@ export default defineConfig({
     },
   },
   build: {
-    target: "chrome110",
+    target: "es2017", // 兼容 QQ/微信内置浏览器（X5 内核较老），桌面 WebView 不受影响
     chunkSizeWarningLimit: 1200,
   },
 });
