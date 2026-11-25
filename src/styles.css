@@ -2721,3 +2721,130 @@ html.has-wallpaper .topbar {
   font-size: 10.5px;
   color: var(--ink-3);
 }
+
+/* ---------- 拖放归属选择弹窗 ---------- */
+
+.drop-assign {
+  text-align: left;
+  width: 420px;
+  max-height: 86vh;
+  overflow-y: auto;
+}
+
+.drop-assign-sub {
+  font-size: 12px;
+  color: var(--ink-2);
+  margin: 4px 0 10px;
+}
+
+.drop-assign-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.drop-assign-file {
+  font-size: 11px;
+  color: var(--ink-2);
+  background: rgba(255, 255, 255, 0.3);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 2px 8px;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drop-assign-input {
+  width: 100%;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+
+.drop-assign-input:focus {
+  outline: none;
+  border-color: rgba(184, 71, 47, 0.5);
+}
+
+.drop-assign-list {
+  display: grid;
+  gap: 4px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.drop-assign-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+}
+
+.drop-assign-item:hover {
+  border-color: rgba(184, 71, 47, 0.45);
+  background: var(--accent-soft);
+}
+
+.drop-assign-item .result-cn {
+  font-size: 13px;
+  color: var(--ink);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drop-assign-item .result-sub {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.drop-assign-item .result-add {
+  font-size: 11.5px;
+  color: var(--accent);
+  flex: none;
+}
+
+.drop-assign-item .result-add.is-done {
+  color: var(--ink-3);
+}
+
+.drop-assign-empty {
+  padding: 14px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.drop-assign-actions {
+  margin-top: 10px;
+  text-align: right;
+}
+
+.drop-assign-abandon {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.drop-assign-abandon:hover {
+  color: var(--accent);
+}

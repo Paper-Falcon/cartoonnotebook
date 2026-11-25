@@ -11,6 +11,7 @@ import { Appearance, Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTa
 import { Candidate, loadIndex } from "./lib/search";
 import { loadWebWallGL, SceneHandle } from "./lib/scenewall";
 import { search } from "./lib/search";
+import DropAssignDialog, { UnrecognizedFile } from "./components/DropAssignDialog";
 import { isTauri } from "./lib/media";
 import SettingsDialog from "./components/SettingsDialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -93,6 +94,7 @@ export default function App() {
   // 主页拖放：自动识别素材属于哪部番
   const [mainDrop, setMainDrop] = useState(false);
   const [mainBusy, setMainBusy] = useState<string | null>(null);
+  const [dropAssign, setDropAssign] = useState<UnrecognizedFile[] | null>(null);
   const worksRef = useRef<Work[]>(works);
   worksRef.current = works;
   const appWindow = getCurrentWindow();
@@ -385,18 +387,20 @@ export default function App() {
     setMainBusy("识别素材中…");
     try {
       const done = new Map<string, { count: number; isNew: boolean }>();
-      const skipped: string[] = [];
+      const unrecognized: UnrecognizedFile[] = [];
 
       for (const p of files) {
         const base = p.split(/[\\/]/).pop() || p;
+        const parsed = cleanTitle(base);
         if (!indexReady) {
-          skipped.push(base);
+          unrecognized.push({ path: p, episode: parsed.episode });
           continue;
         }
-        const { title, episode } = cleanTitle(base);
+        const { title, episode } = parsed;
         const best = search(title)[0];
         if (!best || best.score < 100 || (!best.cn && !best.jp)) {
-          skipped.push(base);
+          // 文件名里没有番名（自己录的屏/截图）→ 弹归属选择框
+          unrecognized.push({ path: p, episode });
           continue;
         }
 
@@ -436,8 +440,9 @@ export default function App() {
       for (const [label, info] of done) {
         parts.push(`${label} ← ${info.count} 个`);
       }
-      if (skipped.length) parts.push(`无法识别 ${skipped.length} 个`);
-      showToast(parts.length ? parts.join("，") : "没有可导入的素材");
+      if (parts.length) showToast(parts.join("，"));
+      // 识别不出的（自己录的屏/截图）弹归属选择框
+      if (unrecognized.length) setDropAssign(unrecognized);
     } catch (e) {
       showToast(`素材导入失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
@@ -658,6 +663,25 @@ export default function App() {
             style={{ background: `rgba(251, 250, 247, ${wall.veil})` }}
           />
         </div>
+      )}
+
+      {dropAssign && (
+        <DropAssignDialog
+          files={dropAssign}
+          works={works}
+          onDone={(msg) => {
+            setDropAssign(null);
+            showToast(msg);
+            // 挂完素材刷新一下番的列表排序
+            listWorks()
+              .then((fresh) => {
+                setWorks((prev) =>
+                  prev.map((w) => fresh.find((f) => f.id === w.id) ?? w),
+                );
+              })
+              .catch(() => undefined);
+          }}
+        />
       )}
 
       {(mainDrop || mainBusy) && (
