@@ -97,7 +97,8 @@ export default function App() {
   const [dropAssign, setDropAssign] = useState<UnrecognizedFile[] | null>(null);
   const worksRef = useRef<Work[]>(works);
   worksRef.current = works;
-  const appWindow = getCurrentWindow();
+  // 普通浏览器（手机网页）没有 Tauri 环境，取句柄会崩——守卫
+  const appWindow = isTauri() ? getCurrentWindow() : null;
 
   // 背景壁纸：设置存在后端，启动时取一次
   const wallActive = Boolean(
@@ -697,7 +698,7 @@ export default function App() {
         onDoubleClick={(e) => {
           const t = e.target as HTMLElement;
           if (t.closest("button, input, .searchbox, .win-controls")) return;
-          if (!t.closest("[data-tauri-drag-region]")) return;
+          if (!t.closest("[data-tauri-drag-region]") || !appWindow) return;
           void appWindow.toggleMaximize();
         }}
       >
@@ -738,27 +739,29 @@ export default function App() {
           <span className="stat-label">部收藏</span>
           {doneCount > 0 && <span className="stat-sub">其中看完 {doneCount}</span>}
 
-          <div className="win-controls">
-            <button
-              title="最小化"
-              onClick={() => void appWindow.minimize()}
-            >
-              &#x2500;
-            </button>
-            <button
-              title="最大化 / 还原"
-              onClick={() => void appWindow.toggleMaximize()}
-            >
-              &#x25A1;
-            </button>
-            <button
-              className="win-close"
-              title="关闭"
-              onClick={() => void appWindow.close()}
-            >
-              &#x2715;
-            </button>
-          </div>
+          {appWindow && (
+            <div className="win-controls">
+              <button
+                title="最小化"
+                onClick={() => void appWindow.minimize()}
+              >
+                &#x2500;
+              </button>
+              <button
+                title="最大化 / 还原"
+                onClick={() => void appWindow.toggleMaximize()}
+              >
+                &#x25A1;
+              </button>
+              <button
+                className="win-close"
+                title="关闭"
+                onClick={() => void appWindow.close()}
+              >
+                &#x2715;
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
