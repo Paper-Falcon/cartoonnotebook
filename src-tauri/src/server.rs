@@ -217,6 +217,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/pair", get(pair_info))
         .route("/pair", get(pair_landing))
         .route("/diag", get(diag_page))
+        .route("/api/firewall", get(firewall_status).post(firewall_allow))
         .fallback(spa)
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .layer(CorsLayer::permissive())
@@ -612,6 +613,41 @@ async fn pair_landing(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     (headers, Redirect::to(&format!("/?boot={stamp}"))).into_response()
+}
+
+/// 检查防火墙放行规则是否存在（查询不需要管理员权限）
+fn firewall_rule_exists() -> bool {
+    let out = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", "name=CartoonNotebook8787"])
+        .output();
+    match out {
+        Ok(o) => {
+            let text = String::from_utf8_lossy(&o.stdout).to_lowercase();
+            text.contains("cartoonnotebook8787")
+        }
+        Err(_) => false,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FirewallStatus {
+    pub rule: bool,
+}
+
+async fn firewall_status() -> Json<FirewallStatus> {
+    Json(FirewallStatus {
+        rule: firewall_rule_exists(),
+    })
+}
+
+/// 一键放行：弹出 UAC 确认框（用户点「是」后规则永久生效）
+async fn firewall_allow() -> Json<serde_json::Value> {
+    let ps = "-NoProfile -WindowStyle Hidden -Command Start-Process netsh -ArgumentList 'advfirewall','firewall','add','rule','name=CartoonNotebook8787','dir=in','action=allow','protocol=TCP','localport=8787' -Verb RunAs";
+    let spawned = std::process::Command::new("powershell")
+        .args(ps.split_whitespace().collect::<Vec<_>>())
+        .spawn();
+    Json(json!({ "spawned": spawned.is_ok() }))
 }
 
 /// 手机端排障页：无缓存、纯内联 ES5，直接暴露每一步的真实状态

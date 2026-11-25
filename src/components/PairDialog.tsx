@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
-import { PairInfo, getPairInfo } from "../lib/api";
+import { PairInfo, allowFirewall, getFirewallStatus, getPairInfo } from "../lib/api";
 
 interface Props {
   onClose: () => void;
@@ -10,12 +10,18 @@ interface Props {
 export default function PairDialog({ onClose, onToast }: Props) {
   const [info, setInfo] = useState<PairInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 防火墙放行状态：新电脑上没放行时给一键操作
+  const [fwRule, setFwRule] = useState<boolean | null>(null);
+  const [fwBusy, setFwBusy] = useState(false);
 
   function load() {
     setError(null);
     getPairInfo()
       .then(setInfo)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)));
+    getFirewallStatus()
+      .then((r) => setFwRule(r.rule))
+      .catch(() => setFwRule(false));
   }
 
   useEffect(() => {
@@ -47,6 +53,37 @@ export default function PairDialog({ onClose, onToast }: Props) {
 
         <h2>手机访问</h2>
         <p className="pair-sub">手机和电脑连同一个 Wi-Fi，扫码即可。一次配对，长期有效。</p>
+
+        {fwRule === false && (
+          <div className="pair-fw">
+            <span>
+              首次使用需放行 Windows 防火墙（会弹一个系统确认框，点「是」）
+            </span>
+            <button
+              className="pair-fw-btn"
+              disabled={fwBusy}
+              onClick={() => {
+                setFwBusy(true);
+                allowFirewall()
+                  .catch(() => undefined)
+                  .finally(() => {
+                    // 等 UAC 确认完成后复查状态
+                    window.setTimeout(() => {
+                      getFirewallStatus()
+                        .then((r) => {
+                          setFwRule(r.rule);
+                          if (r.rule) onToast("防火墙已放行");
+                        })
+                        .catch(() => undefined)
+                        .finally(() => setFwBusy(false));
+                    }, 2500);
+                  });
+              }}
+            >
+              {fwBusy ? "等待确认…" : "一键放行"}
+            </button>
+          </div>
+        )}
 
         {error ? (
           <div className="pair-error">

@@ -199,6 +199,12 @@ export interface PairInfo {
 
 export const getPairInfo = () => request<PairInfo>("/api/pair");
 
+export const getFirewallStatus = () =>
+  request<{ rule: boolean }>("/api/firewall");
+
+export const allowFirewall = () =>
+  request<{ spawned: boolean }>("/api/firewall", { method: "POST" });
+
 // ---------------- 标签 ----------------
 
 export interface Tag {
