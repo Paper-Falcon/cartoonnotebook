@@ -6,9 +6,12 @@ import PairDialog from "./components/PairDialog";
 import ExportDialog from "./components/ExportDialog";
 import TagsDialog from "./components/TagsDialog";
 import WallpaperDialog from "./components/WallpaperDialog";
+import { importMedia, patchMediaEpisode } from "./lib/api";
 import { Appearance, Tag, WallpaperState, Work, STATUS_LABEL, addWork, addWorkTag, getAppearance, getWallpaperSetting, setAppearance as saveAppearanceApi, setWallpaperSetting, listTags, listWorks, patchWork, removeWork, wallpaperEntryUrl, wallpaperPreviewUrl, wallpaperVideoUrl } from "./lib/api";
 import { Candidate, loadIndex } from "./lib/search";
 import { loadWebWallGL, SceneHandle } from "./lib/scenewall";
+import { search } from "./lib/search";
+import { isTauri } from "./lib/media";
 import SettingsDialog from "./components/SettingsDialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { API_BASE } from "./lib/api";
@@ -82,6 +85,12 @@ export default function App() {
     color: "",
   });
   const [showSettings, setShowSettings] = useState(false);
+
+  // 主页拖放：自动识别素材属于哪部番
+  const [mainDrop, setMainDrop] = useState(false);
+  const [mainBusy, setMainBusy] = useState<string | null>(null);
+  const worksRef = useRef<Work[]>(works);
+  worksRef.current = works;
   const appWindow = getCurrentWindow();
 
   // 背景壁纸：设置存在后端，启动时取一次
@@ -293,6 +302,142 @@ export default function App() {
     ? (works.find((w) => w.id === selectedId) ?? null)
     : null;
 
+  // ---------- 主页拖放自动识别 ----------
+
+  function cleanTitle(raw: string): { title: string; episode: number | null } {
+    let name = raw.replace(/\.[^.]+$/, "");
+    let episode: number | null = null;
+
+    // 集数：S01E02 / 第05话(集) / 结尾 -05 _05 [05] / 05
+    const mSx = name.match(/S\d{1,2}E(\d{1,3})/i);
+    if (mSx) {
+      episode = Number(mSx[1]);
+    } else {
+      const mCn = name.match(/第\s*(\d{1,3})\s*[话集]/);
+      if (mCn) episode = Number(mCn[1]);
+    }
+    name = name.replace(/S\d{1,2}E\d{1,3}/gi, " ");
+    name = name.replace(/第\s*\d{1,3}\s*[话集]/g, " ");
+
+    // 噪声：[]组名/属性、括号补充、分辨率/编码/来源
+    name = name.replace(/\[[^\]]*\]/g, " ");
+    name = name.replace(/（[^）]*）/g, " ").replace(/\([^)]*\)/g, " ");
+    name = name.replace(
+      /(1080p|720p|480p|2160p|4k|hevc|h\.?26[45]|x26[45]|aac|flac|bdrip|webrip|web-?dl|blu-?ray|baha|atk|mint|vcb|leopard|dxabc|Nekomoe\s*Kissaten)/gi,
+      " ",
+    );
+    // 结尾独立集数（前面已提取的话这里只负责剥掉）
+    if (episode !== null) name = name.replace(/[\s_\-.]{0,3}\d{1,3}$/, " ");
+
+    name = name
+      .replace(/[\s_\-.]+$/g, "")
+      .replace(/^[\s_\-.]+/g, "")
+      .replace(/\s{2,}/g, " ")
+      .trim();
+    return { title: name, episode };
+  }
+
+  async function handleMainDrop(paths: string[]) {
+    const files = paths.filter(
+      (p) => !/\.(txt|md|json|exe|dll|zip|rar|7z)$/i.test(p),
+    );
+    if (!files.length) return;
+    setMainBusy("识别素材中…");
+    try {
+      const done = new Map<string, { count: number; isNew: boolean }>();
+      const skipped: string[] = [];
+
+      for (const p of files) {
+        const base = p.split(/[\\/]/).pop() || p;
+        if (!indexReady) {
+          skipped.push(base);
+          continue;
+        }
+        const { title, episode } = cleanTitle(base);
+        const best = search(title)[0];
+        if (!best || best.score < 100 || (!best.cn && !best.jp)) {
+          skipped.push(base);
+          continue;
+        }
+
+        // 索引命中 → 库里有就直接挂，没有就新建条目
+        let work = worksRef.current.find(
+          (w) =>
+            (best.bangumiId > 0 && w.bangumiId === best.bangumiId) ||
+            (best.anilistId > 0 && w.anilistId === best.anilistId),
+        );
+        let isNew = false;
+        if (!work) {
+          work = await addWork({
+            anilistId: best.anilistId || undefined,
+            bangumiId: best.bangumiId || undefined,
+            titleCn: best.cn || best.jp,
+            titleJp: best.jp || undefined,
+            year: best.year || undefined,
+          });
+          isNew = true;
+        }
+
+        const mode = work.mediaMode === "ref" ? "ref" : "archive";
+        const media = await importMedia(work.id, p, mode);
+        if (episode !== null && episode > 0) {
+          try {
+            await patchMediaEpisode(media.id, episode);
+          } catch {
+            /* 分集写不上不影响导入 */
+          }
+        }
+        const label = `${isNew ? "新建 " : ""}${work.titleCn}`;
+        const cur = done.get(label) ?? { count: 0, isNew };
+        done.set(label, { count: cur.count + 1, isNew: cur.isNew || isNew });
+      }
+
+      const parts: string[] = [];
+      for (const [label, info] of done) {
+        parts.push(`${label} ← ${info.count} 个`);
+      }
+      if (skipped.length) parts.push(`无法识别 ${skipped.length} 个`);
+      showToast(parts.length ? parts.join("，") : "没有可导入的素材");
+    } catch (e) {
+      showToast(`素材导入失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setMainBusy(null);
+    }
+  }
+
+  // 拖放监听：抽屉开着时让位给抽屉自己的导入逻辑
+  useEffect(() => {
+    if (!isTauri()) return undefined;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+        const un = await getCurrentWebview().onDragDropEvent((event) => {
+          const payload = event.payload;
+          if (payload.type === "enter" || payload.type === "over") {
+            if (!selectedId) setMainDrop(true);
+          } else if (payload.type === "leave") {
+            setMainDrop(false);
+          } else if (payload.type === "drop") {
+            setMainDrop(false);
+            if (selectedId) return; // 抽屉里自己处理
+            void handleMainDrop(payload.paths);
+          }
+        });
+        if (cancelled) un();
+        else unlisten = un;
+      } catch {
+        /* 浏览器里没有这个 API */
+      }
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId, indexReady]);
+
   async function handleAdd(c: Candidate): Promise<Work | undefined> {
     try {
       const work = await addWork({
@@ -472,6 +617,12 @@ export default function App() {
             className="wallpaper-veil"
             style={{ background: `rgba(251, 250, 247, ${wall.veil})` }}
           />
+        </div>
+      )}
+
+      {(mainDrop || mainBusy) && (
+        <div className="drop-veil" onClick={(e) => e.stopPropagation()}>
+          {mainBusy ?? "松开鼠标，自动识别素材归属"}
         </div>
       )}
 
