@@ -33,7 +33,7 @@ pub fn run() {
             let st = state.clone();
             tauri::async_runtime::spawn(async move {
                 // 绑 0.0.0.0：手机要能连进来；本机访问走 loopback 免口令
-                if let Err(e) = server::serve(st, "0.0.0.0", port).await {
+                if let Err(e) = server::serve(st.clone(), "0.0.0.0", port).await {
                     eprintln!("[server] 启动失败: {e:#}");
                 }
             });
@@ -47,16 +47,37 @@ pub fn run() {
                 });
             }
 
+            // 等本机服务端口就绪再创建窗口（杜绝「网页视图先于服务加载」的白屏竞态）
+            for _ in 0..80 {
+                if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            // 窗口直接加载本机服务：不依赖 tauri:// 资产协议，桌面与手机同一套渲染路径
+            let url: tauri::Url = format!("http://127.0.0.1:{port}/")
+                .parse()
+                .expect("解析本机地址失败");
+            let win = tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::External(url))
+                .title("动漫档案馆")
+                .inner_size(1320.0, 860.0)
+                .min_inner_size(980.0, 660.0)
+                .resizable(true)
+                .center()
+                .decorations(false)
+                .transparent(true)
+                .build()
+                .expect("创建主窗口失败");
+
             // 恢复上次窗口的大小和位置
-            if let Some(win) = app.get_webview_window("main") {
-                if let Some(cfg) = server::load_window_cfg(&state) {
-                    if cfg.w >= 400 && cfg.h >= 300 && cfg.x > -2000 && cfg.y > -2000 {
-                        let _ = win.set_position(tauri::PhysicalPosition::new(cfg.x, cfg.y));
-                        let _ = win.set_size(tauri::PhysicalSize::new(cfg.w, cfg.h));
-                    }
-                    if cfg.maximized {
-                        let _ = win.maximize();
-                    }
+            if let Some(cfg) = server::load_window_cfg(&state) {
+                if cfg.w >= 400 && cfg.h >= 300 && cfg.x > -2000 && cfg.y > -2000 {
+                    let _ = win.set_position(tauri::PhysicalPosition::new(cfg.x, cfg.y));
+                    let _ = win.set_size(tauri::PhysicalSize::new(cfg.w, cfg.h));
+                }
+                if cfg.maximized {
+                    let _ = win.maximize();
                 }
             }
             Ok(())
