@@ -2,7 +2,7 @@ use crate::{anilist, bangumi, db};
 use axum::{
     body::Body,
     extract::{ConnectInfo, Multipart, Path, Query, State},
-    http::{header, HeaderMap, Request, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderName, Request, StatusCode, Uri},
     middleware::{self, Next},
     response::{IntoResponse, Redirect, Response},
     routing::{delete, get, patch, post},
@@ -310,14 +310,59 @@ async fn spa(uri: Uri) -> Response {
             .into_response();
     }
     match Assets::get("index.html") {
-        Some(file) => (
-            [
-                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (header::CACHE_CONTROL, "no-cache"),
-            ],
-            file.data.into_owned(),
-        )
-            .into_response(),
+        Some(file) => {
+            // 手机端排障：注入加载诊断条（可见地暴露 UA/资源错误/启动状态）
+            let html = String::from_utf8_lossy(&file.data).to_string();
+            let diag = r#"<script>
+(function(){
+  function boot(){
+    var s=document.getElementById('__diag');
+    if(!s){
+      s=document.createElement('div');
+      s.id='__diag';
+      s.style.cssText='position:fixed;bottom:0;left:0;right:0;z-index:999999;background:#fffbe8;color:#8a2b1d;font:10px/1.5 monospace;padding:4px 6px;max-height:38%;overflow:auto;border-top:1px solid #e0d0b0;text-align:left';
+      (document.body||document.documentElement).appendChild(s);
+    }
+    return s;
+  }
+  function log(m){
+    var s=boot();
+    var d=document.createElement('div');
+    d.textContent='• '+m;
+    s.appendChild(d);
+  }
+  log('UA: '+navigator.userAgent.slice(0,80));
+  log('HTML: '+document.readyState);
+  window.addEventListener('error',function(e){
+    if(e.target&&e.target.src){log('资源加载失败: '+e.target.src.slice(-60));}
+    else{log('脚本错误: '+(e.message||'未知'));}
+  },true);
+  window.addEventListener('unhandledrejection',function(e){
+    log('Promise拒绝: '+e.reason);
+  });
+  var n=0;
+  var t=setInterval(function(){
+    n++;
+    if(window.__APP_BOOTED){log('应用启动成功 ✓');clearInterval(t);setTimeout(function(){var x=document.getElementById('__diag');if(x)x.remove();},4000);}
+    else if(n>40){log('应用 12 秒仍未启动——JS 加载或执行失败');clearInterval(t);}
+  },300);
+  window.__DIAG_LOG=log;
+})();
+</script>"#;
+            let html = if html.contains("__TAURI_INTERNALS__") || html.contains("</body>") {
+                html.replace("</body>", &format!("{diag}</body>"))
+            } else {
+                html + &diag
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                html.into_bytes(),
+            )
+                .into_response()
+        }
         None => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "前端资源没打进包里，先跑一次 npm run build",
@@ -550,11 +595,15 @@ async fn pair_landing(
         "cn_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000",
         st.phone_token
     );
-    (
-        [(header::SET_COOKIE, cookie)],
-        Redirect::to("/"),
-    )
-        .into_response()
+    // 顺手清掉这个源站的旧缓存：老版本页面曾无缓存头，
+    // 手机可能存着引用已失效资源的 index.html（白屏元凶）
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, cookie.parse().unwrap());
+    headers.insert(
+        HeaderName::from_static("clear-site-data"),
+        "\"cache\"".parse().unwrap(),
+    );
+    (headers, Redirect::to("/")).into_response()
 }
 
 async fn health() -> Json<serde_json::Value> {
