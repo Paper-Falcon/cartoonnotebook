@@ -2848,3 +2848,9 @@ html.has-wallpaper .topbar {
 .drop-assign-abandon:hover {
   color: var(--accent);
 }
+
+.pair-alt-warn {
+  font-size: 10px;
+  color: #c0392b;
+  margin-top: 2px;
+}

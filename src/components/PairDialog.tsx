@@ -102,6 +102,11 @@ export default function PairDialog({ onClose, onToast }: Props) {
                       <div className="pair-alt-meta">
                         <div className="pair-alt-ip">{a.ip}</div>
                         <div className="pair-alt-adapter">{a.adapter}</div>
+                        {a.adapter.startsWith("公网") && (
+                          <div className="pair-alt-warn">
+                            互联网可达，链接勿外传
+                          </div>
+                        )}
                       </div>
                     </div>
                   ))}

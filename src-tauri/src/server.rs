@@ -344,6 +344,22 @@ fn lan_ip() -> Option<String> {
     lan_ips().into_iter().next()
 }
 
+/// 公网地址：排除私网/回环/链路本地/虚拟 VPN（Radmin 26.x）网段。
+/// 机器网卡上直接配了公网 IP 时，手机用流量也能直连。
+fn is_public_ipv4(ip: &str) -> bool {
+    let Ok(v4) = ip.parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let o = v4.octets();
+    !((o[0] == 10)
+        || (o[0] == 127)
+        || (o[0] == 172 && (16..=31).contains(&o[1]))
+        || (o[0] == 192 && o[1] == 168)
+        || (o[0] == 169 && o[1] == 254)
+        || (o[0] == 100 && (64..=127).contains(&o[1]))
+        || (o[0] == 26))
+}
+
 /// 多网卡机器（VMware/VPN/多网络）上，默认路由选的 IP 手机多半连不上。
 /// 列出所有可能的局域网地址：默认路由 IP 打头，其余来自 ipconfig，
 /// 跳过回环/链路本地/常见虚拟网卡网段。
@@ -475,6 +491,19 @@ async fn pair_info(State(st): State<Arc<AppState>>) -> Result<Json<PairInfo>, Ap
             url: a_url,
             qr: a_qr,
         });
+    }
+    // 默认路由是公网 IP 时，补一个「手机流量直连」的候选
+    if let Some(first) = ips.first() {
+        if is_public_ipv4(first) && !alternates.iter().any(|a| a.ip == *first) {
+            let a_url = format!("http://{first}:{}/pair?c={code}", st.port);
+            let a_qr = qr_svg(&a_url);
+            alternates.push(AlternatePair {
+                ip: first.clone(),
+                adapter: "公网（手机流量也能连）".to_string(),
+                url: a_url,
+                qr: a_qr,
+            });
+        }
     }
 
     Ok(Json(PairInfo {
