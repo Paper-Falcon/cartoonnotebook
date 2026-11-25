@@ -9,7 +9,7 @@ interface Props {
   existingBgm: Set<number>;
   initialQuery?: string;
   works: Work[];
-  onAdd: (c: Candidate) => Promise<void>;
+  onAdd: (c: Candidate) => Promise<Work | undefined>;
   onOpen: (id: number) => void;
 }
 
@@ -33,7 +33,8 @@ export default function SearchBox({
   const [active, setActive] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   // 连续添加：加过的候选标"已加入"，面板保持打开
-  const [addedKeys, setAddedKeys] = useState<Set<string>>(new Set());
+  // 本次会话加过的候选：key → 新作品 id，行上的「打开」靠它跳详情
+  const [added, setAdded] = useState<Map<string, number>>(new Map());
   const boxRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -158,14 +159,27 @@ export default function SearchBox({
     return c.anilistId ? `a-${c.anilistId}` : `b-${c.bangumiId || c.cn}`;
   }
 
+  function openAdded(id: number) {
+    onOpen(id);
+    setQ("");
+    setOpen(false);
+    inputRef.current?.blur();
+  }
+
   async function pick(c: Candidate) {
     const key = keyOf(c);
-    if (busy || addedKeys.has(key)) return;
+    // 已经加过：行上现在就是「打开」按钮，点了直接跳详情
+    const wid = added.get(key);
+    if (wid) {
+      openAdded(wid);
+      return;
+    }
+    if (busy) return;
     setBusy(key);
     try {
-      await onAdd(c);
+      const work = await onAdd(c);
       // 加完不清空不关闭：想连加几部就点几部
-      setAddedKeys((prev) => new Set(prev).add(key));
+      if (work) setAdded((prev) => new Map(prev).set(key, work.id));
     } finally {
       setBusy(null);
     }
@@ -293,9 +307,12 @@ export default function SearchBox({
                           .join(" · ")}
                       </span>
                     </span>
-                    <span className="result-add">
-                      {addedKeys.has(key)
-                        ? "已加入"
+                    <span
+                      className={`result-add${added.has(key) ? " is-open" : ""}`}
+                      title={added.has(key) ? "点开详情" : undefined}
+                    >
+                      {added.has(key)
+                        ? "打开"
                         : busy === key
                           ? "加入中"
                           : "加入"}
@@ -335,7 +352,7 @@ export default function SearchBox({
                     className={`result${idx === active ? " is-active" : ""}`}
                     onMouseEnter={() => setActive(idx)}
                     onClick={() => void pick(c)}
-                    disabled={busy === String(h.id) || addedKeys.has(`b-${h.id}`)}
+                    disabled={busy === String(h.id)}
                   >
                     <span className="result-main">
                       <span className="result-cn">{h.nameCn || h.name}</span>
@@ -345,9 +362,12 @@ export default function SearchBox({
                           .join(" · ")}
                       </span>
                     </span>
-                    <span className="result-add">
-                      {addedKeys.has(`b-${h.id}`)
-                        ? "已加入"
+                    <span
+                      className={`result-add${added.has(`b-${h.id}`) ? " is-open" : ""}`}
+                      title={added.has(`b-${h.id}`) ? "点开详情" : undefined}
+                    >
+                      {added.has(`b-${h.id}`)
+                        ? "打开"
                         : busy === String(h.id)
                           ? "加入中"
                           : "加入"}

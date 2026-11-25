@@ -2668,3 +2668,9 @@ html.has-wallpaper .topbar {
   font-size: 11px;
   z-index: 2;
 }
+
+/* 搜索结果里「打开」角标：比「已加入」更醒目的可点态 */
+.result-add.is-open {
+  color: var(--accent);
+  font-weight: 500;
+}

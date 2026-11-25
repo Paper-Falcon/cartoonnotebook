@@ -293,7 +293,7 @@ export default function App() {
     ? (works.find((w) => w.id === selectedId) ?? null)
     : null;
 
-  async function handleAdd(c: Candidate) {
+  async function handleAdd(c: Candidate): Promise<Work | undefined> {
     try {
       const work = await addWork({
         anilistId: c.anilistId || undefined,
@@ -318,6 +318,7 @@ export default function App() {
       };
       window.setTimeout(refresh, 4000);
       window.setTimeout(refresh, 10000);
+      return work;
     } catch (e) {
       showToast(`加入失败：${e instanceof Error ? e.message : String(e)}`);
     }
