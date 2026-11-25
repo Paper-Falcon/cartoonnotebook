@@ -292,16 +292,29 @@ async fn spa(uri: Uri) -> Response {
     }
     let path = if raw.is_empty() { "index.html" } else { raw };
 
+    // 带内容哈希的产物放心永久缓存；index.html 必须每次校验，
+    // 否则手机浏览器会拿旧 HTML 引用已不存在的资源 → 白屏
     if let Some(file) = Assets::get(path) {
+        let cache = if path.starts_with("assets/") {
+            "public, max-age=31536000, immutable"
+        } else {
+            "no-cache"
+        };
         return (
-            [(header::CONTENT_TYPE, mime_of(path))],
+            [
+                (header::CONTENT_TYPE, mime_of(path)),
+                (header::CACHE_CONTROL, cache),
+            ],
             file.data.into_owned(),
         )
             .into_response();
     }
     match Assets::get("index.html") {
         Some(file) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
             file.data.into_owned(),
         )
             .into_response(),
