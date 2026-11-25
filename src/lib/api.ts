@@ -194,6 +194,7 @@ export interface PairInfo {
   lanIp: string | null;
   port: number;
   qr: string;
+  alternates?: { ip: string; adapter: string; url: string; qr: string }[];
 }
 
 export const getPairInfo = () => request<PairInfo>("/api/pair");

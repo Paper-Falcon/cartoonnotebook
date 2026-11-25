@@ -341,12 +341,84 @@ fn private_ip_from_ipconfig() -> Option<String> {
 }
 
 fn lan_ip() -> Option<String> {
+    lan_ips().into_iter().next()
+}
+
+/// 多网卡机器（VMware/VPN/多网络）上，默认路由选的 IP 手机多半连不上。
+/// 列出所有可能的局域网地址：默认路由 IP 打头，其余来自 ipconfig，
+/// 跳过回环/链路本地/常见虚拟网卡网段。
+fn lan_ips() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
     if let Some(ip) = default_route_ip() {
         if !ip.starts_with("127.") && !ip.starts_with("169.254.") {
-            return Some(ip);
+            out.push(ip);
         }
     }
-    private_ip_from_ipconfig()
+    for (ip, adapter) in ipconfig_ips() {
+        if out.contains(&ip) {
+            continue;
+        }
+        let virtual_adapter = ["vmware", "virtual", "vpn", "hyper-v", "loopback", "bluetooth", "miniport"]
+            .iter()
+            .any(|k| adapter.to_lowercase().contains(k));
+        // 虚拟网卡仍列出（用户可能就在那个网段），但排到真实网卡后面
+        if virtual_adapter {
+            out.push(ip);
+        } else if ip.starts_with("169.254.") || ip.starts_with("127.") {
+            continue;
+        } else {
+            out.insert(1, ip);
+        }
+    }
+    out
+}
+
+/// ipconfig 解析：返回 (IPv4, 适配器名) 列表
+fn ipconfig_ips() -> Vec<(String, String)> {
+    let out = match std::process::Command::new("ipconfig").output() {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut result: Vec<(String, String)> = Vec::new();
+    let mut adapter = String::new();
+    for line in text.lines() {
+        let line = line.trim_end();
+        if let Some(idx) = line.find(':') {
+            let (head, tail) = (line[..idx].trim(), line[idx + 1..].trim());
+            if head.contains("适配器") || head.to_lowercase().contains("adapter") {
+                // 「以太网适配器 VMware ...:」或「adapter VMware ...:」
+                let name = head
+                    .replace("以太网适配器", "")
+                    .replace("无线局域网适配器", "")
+                    .replace("本地链接", "")
+                    .replace("Ethernet adapter", "")
+                    .replace("Wireless LAN adapter", "")
+                    .trim()
+                    .trim_end_matches(':')
+                    .trim()
+                    .to_string();
+                adapter = name;
+            }
+            if tail.starts_with("192.168.")
+                || tail.starts_with("10.")
+                || tail.starts_with("172.")
+                || tail.starts_with("26.")
+                || tail.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+            {
+                let ip = tail
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.')
+                    .to_string();
+                if ip.parse::<std::net::Ipv4Addr>().is_ok() && adapter.len() > 0 {
+                    result.push((ip, adapter.clone()));
+                }
+            }
+        }
+    }
+    result
 }
 
 #[derive(Serialize)]
@@ -357,29 +429,61 @@ pub struct PairInfo {
     pub lan_ip: Option<String>,
     pub port: u16,
     pub qr: String,
+    /// 多网卡时给备选地址，每个都带二维码
+    pub alternates: Vec<AlternatePair>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlternatePair {
+    pub ip: String,
+    pub adapter: String,
+    pub url: String,
+    pub qr: String,
+}
+
+fn qr_svg(content: &str) -> String {
+    qrcode::QrCode::new(content.as_bytes())
+        .map(|code| {
+            code.render::<qrcode::render::svg::Color>()
+                .min_dimensions(160, 160)
+                .quiet_zone(true)
+                .build()
+        })
+        .unwrap_or_default()
 }
 
 async fn pair_info(State(st): State<Arc<AppState>>) -> Result<Json<PairInfo>, ApiError> {
     let code = st.fresh_pair_code();
-    let ip = lan_ip();
-    let host = ip.clone().unwrap_or_else(|| "127.0.0.1".to_string());
-    let url = format!("http://{host}:{}/pair?c={code}", st.port);
+    let ips = lan_ips();
+    let primary = ips.first().cloned().unwrap_or_else(|| "127.0.0.1".to_string());
+    let url = format!("http://{primary}:{}/pair?c={code}", st.port);
+    let qr = qr_svg(&url);
 
-    let qr = qrcode::QrCode::new(url.as_bytes())
-        .map(|code| {
-            code.render::<qrcode::render::svg::Color>()
-                .min_dimensions(220, 220)
-                .quiet_zone(true)
-                .build()
-        })
-        .unwrap_or_default();
+    let mut alternates = Vec::new();
+    for ip in ips.iter().skip(1).take(4) {
+        let adapter = ipconfig_ips()
+            .into_iter()
+            .find(|(a_ip, _)| a_ip == ip)
+            .map(|(_, name)| name)
+            .unwrap_or_else(|| "未知网卡".to_string());
+        let a_url = format!("http://{ip}:{}/pair?c={code}", st.port);
+        let a_qr = qr_svg(&a_url);
+        alternates.push(AlternatePair {
+            ip: ip.clone(),
+            adapter,
+            url: a_url,
+            qr: a_qr,
+        });
+    }
 
     Ok(Json(PairInfo {
         url,
         code,
-        lan_ip: ip,
+        lan_ip: Some(primary),
         port: st.port,
         qr,
+        alternates,
     }))
 }
 

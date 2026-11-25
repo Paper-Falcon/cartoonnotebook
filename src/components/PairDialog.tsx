@@ -86,6 +86,28 @@ export default function PairDialog({ onClose, onToast }: Props) {
                 ? "二维码 5 分钟内有效，用一次就作废。电脑首次启动若弹出防火墙提示，需要允许「专用网络」。"
                 : "没检测到局域网地址，检查一下电脑是否连着 Wi-Fi。"}
             </p>
+
+            {(info.alternates?.length ?? 0) > 0 && (
+              <>
+                <div className="pair-alt-head">
+                  主地址扫不出来？这台机器有多个网卡，试试备选：
+                </div>
+                <div className="pair-alts">
+                  {(info.alternates ?? []).map((a) => (
+                    <div className="pair-alt" key={a.ip}>
+                      <div
+                        className="pair-qr pair-qr-sm"
+                        dangerouslySetInnerHTML={{ __html: a.qr }}
+                      />
+                      <div className="pair-alt-meta">
+                        <div className="pair-alt-ip">{a.ip}</div>
+                        <div className="pair-alt-adapter">{a.adapter}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </>
         )}
       </div>

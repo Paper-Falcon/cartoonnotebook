@@ -17,6 +17,10 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { API_BASE } from "./lib/api";
 import { genreLabel, parseGenres } from "./lib/genres";
 
+const NOISE_SRC =
+  "1080p|720p|480p|2160p|4k|hevc|h\\.?26[45]|x26[45]|aac|flac|bdrip|webrip|web-?dl|blu-?ray|baha|atk|mint|vcb|leopard|dxabc|Nekomoe\\s*Kissaten";
+const isNoise = (t: string) => new RegExp(NOISE_SRC, "i").test(t);
+
 const TABS = [
   { key: "all", label: "全部" },
   { key: "watching", label: "在看" },
@@ -308,7 +312,6 @@ export default function App() {
     let name = raw.replace(/\.[^.]+$/, "");
     let episode: number | null = null;
 
-    // 集数：S01E02 / 第05话(集) / 结尾 -05 _05 [05] / 05
     const mSx = name.match(/S\d{1,2}E(\d{1,3})/i);
     if (mSx) {
       episode = Number(mSx[1]);
@@ -319,23 +322,57 @@ export default function App() {
     name = name.replace(/S\d{1,2}E\d{1,3}/gi, " ");
     name = name.replace(/第\s*\d{1,3}\s*[话集]/g, " ");
 
-    // 噪声：[]组名/属性、括号补充、分辨率/编码/来源
-    name = name.replace(/\[[^\]]*\]/g, " ");
-    name = name.replace(/（[^）]*）/g, " ").replace(/\([^)]*\)/g, " ");
+    // 括号内容分类：纯数字=集数、属性词=噪声，其余最长的一段往往就是片名
+    let bracketTitle = "";
     name = name.replace(
-      /(1080p|720p|480p|2160p|4k|hevc|h\.?26[45]|x26[45]|aac|flac|bdrip|webrip|web-?dl|blu-?ray|baha|atk|mint|vcb|leopard|dxabc|Nekomoe\s*Kissaten)/gi,
-      " ",
+      /\[([^\]]*)\]|【([^】]*)】|〔([^〕]*)〕/g,
+      (_m, g1?: string, g2?: string, g3?: string) => {
+        const content = (g1 ?? g2 ?? g3 ?? "").trim();
+        if (!content) return " ";
+        if (/^\d{1,3}$/.test(content)) {
+          if (episode === null) episode = Number(content);
+          return " ";
+        }
+        if (isNoise(content)) return " ";
+        if (content.length > bracketTitle.length) bracketTitle = content;
+        return " ";
+      },
     );
-    // 结尾独立集数（前面已提取的话这里只负责剥掉）
-    if (episode !== null) name = name.replace(/[\s_\-.]{0,3}\d{1,3}$/, " ");
 
-    // 点号/下划线是字幕组文件名的主要分隔符，必须归一成空格
+    // 括号外的属性词与噪声
+    name = name.replace(new RegExp(NOISE_SRC, "gi"), " ");
+    name = name.replace(/（[^）]*）/g, " ").replace(/\([^)]*\)/g, " ");
+
+    // 结尾独立集数：没识别过就当集数，已有则剥掉
+    const beforeStrip = name;
+    name = name.replace(/[\s_\-.]{0,3}(\d{1,3})$/, (_m, g) => {
+      if (episode === null) episode = Number(g);
+      return " ";
+    });
+
     name = name.replace(/[._]+/g, " ");
     name = name
       .replace(/[\s_\-.]+$/g, "")
       .replace(/^[\s_\-.]+/g, "")
       .replace(/\s{2,}/g, " ")
       .trim();
+
+    // 括号外剥光了 → 片名多半在括号里（【组名】[片名][05]），用最长括号内容兜底
+    if (name.length < 2) {
+      if (bracketTitle && bracketTitle.replace(/\s/g, "").length >= 2) {
+        name = bracketTitle;
+      } else {
+        name = beforeStrip
+          .replace(/[._]+/g, " ")
+          .replace(/[\s_\-.]+$/g, "")
+          .replace(/^[\s_\-.]+/g, "")
+          .trim();
+        // 「86.mkv」这类：整名就是番名，别把 86 当集数
+        if (episode !== null && name.replace(/\s/g, "") === String(episode)) {
+          episode = null;
+        }
+      }
+    }
     return { title: name, episode };
   }
 
