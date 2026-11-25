@@ -216,6 +216,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/appearance", get(get_appearance).put(set_appearance))
         .route("/api/pair", get(pair_info))
         .route("/pair", get(pair_landing))
+        .route("/diag", get(diag_page))
         .fallback(spa)
         .layer(middleware::from_fn_with_state(state.clone(), guard))
         .layer(CorsLayer::permissive())
@@ -604,6 +605,37 @@ async fn pair_landing(
         "\"cache\"".parse().unwrap(),
     );
     (headers, Redirect::to("/")).into_response()
+}
+
+/// 手机端排障页：无缓存、纯内联 ES5，直接暴露每一步的真实状态
+async fn diag_page() -> Response {
+    let html = r#"<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>加载诊断</title></head>
+<body style="font:13px/1.7 monospace;padding:12px;background:#fffbe8;color:#333">
+<div style="font-weight:bold;margin-bottom:8px">加载诊断（截图发给电脑）</div>
+<div id="out"></div>
+<script>
+function log(m){var d=document.createElement('div');d.textContent='- '+m;document.getElementById('out').appendChild(d);}
+log('页面加载成功（服务器可达，网络没问题）');
+log('UA: '+navigator.userAgent.slice(0,90));
+fetch('/api/health').then(function(r){return r.json()}).then(function(j){log('health 接口: '+JSON.stringify(j))}).catch(function(e){log('health 请求失败: '+e)});
+fetch('/api/works').then(function(r){log('works 接口: HTTP '+r.status+(r.status===200?'（已配对）':'（未配对——需要扫新的配对码）'))}).catch(function(e){log('works 请求失败: '+e)});
+</script>
+<script type="module">window.__MOD_OK=true;</script>
+<script>
+setTimeout(function(){log('ES Module 支持: '+(window.__MOD_OK?'是':'否——老内核，会走降级包'));},250);
+setTimeout(function(){log('诊断完成。全部正常的话，请清一次浏览器缓存（或用无痕）再打开主页');},900);
+</script>
+</body></html>"#;
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        html,
+    )
+        .into_response()
 }
 
 async fn health() -> Json<serde_json::Value> {
