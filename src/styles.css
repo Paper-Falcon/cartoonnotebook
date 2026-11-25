@@ -2609,3 +2609,62 @@ html.has-wallpaper .topbar {
   backdrop-filter: blur(18px) saturate(1.05);
   -webkit-backdrop-filter: blur(18px) saturate(1.05);
 }
+
+/* ---------- 素材批量整理 ---------- */
+
+.media-sel-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  background: rgba(255, 255, 255, 0.28);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(184, 71, 47, 0.35);
+  border-radius: 10px;
+}
+
+.media-sel-count {
+  font-size: 12px;
+  color: var(--accent);
+  font-weight: 500;
+  margin-right: auto;
+}
+
+.media-sel-del {
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.media-sel-del:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.media-tile.is-sel {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.media-tile.is-sel::after {
+  content: "✓";
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 50%;
+  font-size: 11px;
+  z-index: 2;
+}

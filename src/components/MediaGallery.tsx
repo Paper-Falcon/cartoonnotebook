@@ -58,18 +58,29 @@ export default function MediaGallery({ workId, mode, onModeChange, onToast }: Pr
   }, [workId]);
 
   // 粘贴截图：拖进来太慢，粘一下最快
+  // 用 ref 取最新 addFiles，避免闭包过期；WebView2 里截图
+  // 有时只出现在 clipboardData.items，files/items 双通道都查
+  const addFilesRef = useRef(addFiles);
+  addFilesRef.current = addFiles;
+
   useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
-      const files = Array.from(e.clipboardData?.files ?? []).filter((f) =>
+      const dt = e.clipboardData;
+      let files = Array.from(dt?.files ?? []).filter((f) =>
         f.type.startsWith("image/"),
       );
+      if (!files.length && dt?.items) {
+        files = Array.from(dt.items)
+          .filter((it) => it.kind === "file" && it.type.startsWith("image/"))
+          .map((it) => it.getAsFile())
+          .filter((f): f is File => f !== null);
+      }
       if (!files.length) return;
       e.preventDefault();
-      void addFiles(files);
+      void addFilesRef.current(files);
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workId]);
 
   // 桌面端拖拽：Tauri 会给出真实路径，能走"引用"模式
@@ -165,6 +176,50 @@ export default function MediaGallery({ workId, mode, onModeChange, onToast }: Pr
     }
   }
 
+  // ---------- 批量删除 ----------
+  const [selMode, setSelMode] = useState(false);
+  const [sel, setSel] = useState<Set<number>>(new Set());
+
+  function toggleSel(id: number) {
+    setSel((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function exitSel() {
+    setSelMode(false);
+    setSel(new Set());
+  }
+
+  async function removeSelected() {
+    const ids = [...sel];
+    if (!ids.length) return;
+    if (
+      !window.confirm(
+        `确定删除选中的 ${ids.length} 个素材？归档文件会先移到 data/.trash`,
+      )
+    )
+      return;
+    let ok = 0;
+    const failed = new Set<number>();
+    for (const id of ids) {
+      try {
+        await deleteMedia(id);
+        ok++;
+      } catch {
+        failed.add(id);
+      }
+    }
+    setItems((prev) => prev.filter((m) => !ids.includes(m.id) || failed.has(m.id)));
+    onToast(
+      failed.size ? `已删除 ${ok} 个，${failed.size} 个失败` : `已删除 ${ok} 个素材`,
+    );
+    exitSel();
+  }
+
   async function remove(media: Media) {
     if (!window.confirm("确定删除这个素材？归档文件会先移到 data/.trash")) return;
     try {
@@ -216,8 +271,10 @@ export default function MediaGallery({ workId, mode, onModeChange, onToast }: Pr
             {list.map((m) => (
               <button
                 key={m.id}
-                className={`media-tile${m.missing ? " is-missing" : ""}`}
-                onClick={() => setPreview(m)}
+                className={`media-tile${m.missing ? " is-missing" : ""}${
+                  selMode && sel.has(m.id) ? " is-sel" : ""
+                }`}
+                onClick={() => (selMode ? toggleSel(m.id) : setPreview(m))}
                 title={m.path}
               >
                 {m.thumb || m.poster ? (
@@ -275,6 +332,12 @@ export default function MediaGallery({ workId, mode, onModeChange, onToast }: Pr
         </p>
         <div className="mode-switch">
           <button
+            className={`mode-btn${selMode ? " is-on" : ""}`}
+            onClick={() => (selMode ? exitSel() : setSelMode(true))}
+          >
+            {selMode ? "退出批量" : "批量整理"}
+          </button>
+          <button
             className={`mode-btn${mode === "ref" ? " is-on" : ""}`}
             onClick={() => onModeChange("ref")}
           >
@@ -288,6 +351,31 @@ export default function MediaGallery({ workId, mode, onModeChange, onToast }: Pr
           </button>
         </div>
       </div>
+
+      {selMode && (
+        <div className="media-sel-bar">
+          <span className="media-sel-count">已选 {sel.size} 个</span>
+          <button
+            className="mode-btn"
+            onClick={() => setSel(new Set(items.map((m) => m.id)))}
+          >
+            全选
+          </button>
+          <button
+            className="mode-btn"
+            onClick={() => setSel(new Set())}
+          >
+            清空
+          </button>
+          <button
+            className="media-sel-del"
+            disabled={sel.size === 0}
+            onClick={() => void removeSelected()}
+          >
+            删除所选
+          </button>
+        </div>
+      )}
 
       {dragging &&
         createPortal(<div className="drop-veil">松开鼠标，加入素材</div>, document.body)}

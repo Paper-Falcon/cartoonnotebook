@@ -133,7 +133,7 @@ export default function WorkDetail({
           ×
         </button>
 
-        <header className="drawer-head">
+        <header className="drawer-head" data-tauri-drag-region>
           <div className="drawer-cover">
             {src && !broken ? (
               <img src={src} alt={work.titleCn} onError={() => setBroken(true)} />
