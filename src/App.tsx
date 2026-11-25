@@ -329,6 +329,8 @@ export default function App() {
     // 结尾独立集数（前面已提取的话这里只负责剥掉）
     if (episode !== null) name = name.replace(/[\s_\-.]{0,3}\d{1,3}$/, " ");
 
+    // 点号/下划线是字幕组文件名的主要分隔符，必须归一成空格
+    name = name.replace(/[._]+/g, " ");
     name = name
       .replace(/[\s_\-.]+$/g, "")
       .replace(/^[\s_\-.]+/g, "")
@@ -338,9 +340,10 @@ export default function App() {
   }
 
   async function handleMainDrop(paths: string[]) {
-    const files = paths.filter(
-      (p) => !/\.(txt|md|json|exe|dll|zip|rar|7z)$/i.test(p),
-    );
+    const files = paths.filter((p) => {
+      if (!/\.[a-z0-9]{1,5}$/i.test(p)) return false; // 无扩展名 = 文件夹
+      return !/\.(txt|md|json|exe|dll|zip|rar|7z|nfo|srt|ass|ssa|smi)$/i.test(p);
+    });
     if (!files.length) return;
     setMainBusy("识别素材中…");
     try {
