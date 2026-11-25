@@ -604,7 +604,12 @@ async fn pair_landing(
         HeaderName::from_static("clear-site-data"),
         "\"cache\"".parse().unwrap(),
     );
-    (headers, Redirect::to("/")).into_response()
+    // 跳到带时间戳的地址：绕开手机浏览器里可能中毒的旧缓存条目
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    (headers, Redirect::to(&format!("/?boot={stamp}"))).into_response()
 }
 
 /// 手机端排障页：无缓存、纯内联 ES5，直接暴露每一步的真实状态
